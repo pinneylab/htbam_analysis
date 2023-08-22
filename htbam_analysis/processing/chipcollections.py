@@ -19,7 +19,7 @@ import pandas as pd
 from tqdm import tqdm
 from skimage import io
 
-from htbam.image.processing.chip import ChipImage
+from htbam_analysis.processing.chip import ChipImage
 
 
 class ChipSeries:

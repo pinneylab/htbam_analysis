@@ -2,8 +2,8 @@
 
 """Sub package for rastering."""
 
-from htbam.image.stitching.rastering import raster
-from htbam.image.stitching.rastering import raster_params
+from htbam_analysis.stitching.rastering import raster
+from htbam_analysis.stitching.rastering import raster_params
 
 __author__ = """Duncan Muir"""
 __email__ = ""

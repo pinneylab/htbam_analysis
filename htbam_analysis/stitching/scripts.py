@@ -1,4 +1,4 @@
-import htbam.image.stitching.file_handler as fh
+import htbam_analysis.stitching.file_handler as fh
 import logging
 import pathlib
 import os
@@ -87,7 +87,6 @@ def walk_and_stitch(path, stitch_settings, params, stitch_type="kinetic"):
     for root, dirs, files in os.walk(path):
         # check if current base-level directory is in valid channel list
         if os.path.basename(root) in stitch_settings.channels:
-
             found_stitchable = True
 
             curr_channel = os.path.basename(root)

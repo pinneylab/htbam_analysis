@@ -4,7 +4,7 @@ import os
 import logging
 from skimage import io, transform
 from abc import abstractmethod, ABC
-from htbam.image.stitching.rastering.raster_params import RasterParams
+from htbam_analysis.stitching.rastering.raster_params import RasterParams
 from PIL import Image, ImageSequence
 from tqdm import tqdm
 from basicpy import BaSiC
@@ -24,7 +24,6 @@ def ff_subtract(i, ffi, ff_bval, ff_scale):
 def rotate_image(img, rotation_val) -> np.array:
     rotation_params = {"resize": False, "clip": True, "preserve_range": True}
     return transform.rotate(img, rotation_val, **rotation_params).astype("uint16")
-    
 
 
 class Raster(ABC):
@@ -265,7 +264,6 @@ class Raster(ABC):
 
         tiles = self._images
         if self.params.auto_ff and self.params.ff_type == "BaSiC":
-
             tiles = self.ffCorrectedImages = self.applyFF_BaSiC()
             print("completed BaSiC FF correction")
 
@@ -276,7 +274,6 @@ class Raster(ABC):
             )
 
         elif self.params.auto_ff and self.params.ff_type == "BaSiC_masked":
-
             tiles = self.ffCorrectedImages = self.applyFF_BaSiC_masked()
             print("completed BaSiC FF correction with mask")
 
@@ -343,7 +340,6 @@ class Raster(ABC):
         logging.debug("Stitching Complete")
 
     def __lt__(self, other):
-
         selfstem = pathlib.Path(self.image_refs[0]).stem
         otherstem = pathlib.Path(other.image_refs[0]).stem
         return selfstem < otherstem
@@ -377,8 +373,9 @@ class FlatRaster(Raster):
 
         if self._params.rotation:
             # if rotation value provided, rotate all images
-            self._images = [rotate_image(img, self._params.rotation) for img in self._images]
-                
+            self._images = [
+                rotate_image(img, self._params.rotation) for img in self._images
+            ]
 
 
 class StackedRaster(Raster):

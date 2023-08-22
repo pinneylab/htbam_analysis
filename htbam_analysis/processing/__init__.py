@@ -2,7 +2,7 @@
 
 """Top-level package for processing."""
 
-from htbam.image.processing import chip, chipcollections, experiment, org_extension
+from htbam_analysis.processing import chip, chipcollections, experiment, org_extension
 
 __author__ = """Daniel Mokhtari"""
 __email__ = ""

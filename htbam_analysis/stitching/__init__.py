@@ -2,10 +2,8 @@
 
 """Top-level package for stitching."""
 
-from htbam.image.stitching import stitching_settings
-from htbam.image.stitching.rastering import raster_params
-from htbam.image.stitching import scripts
-from htbam.image.stitching import background_images
+from htbam_analysis.stitching import stitching_settings, scripts, background_images
+from htbam_analysis.stitching.rastering import raster_params
 
 __author__ = """Daniel Mokhtari"""
 __email__ = ""

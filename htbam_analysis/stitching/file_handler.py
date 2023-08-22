@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from copy import deepcopy
 import pandas as pd
-from htbam.image.stitching.rastering import raster
+from htbam_analysis.stitching.rastering import raster
 
 
 def get_time(path_name):

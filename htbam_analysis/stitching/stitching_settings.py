@@ -5,7 +5,6 @@ import os
 
 
 class StitchingSettings:
-
     # ff_paths = {}
     # ff_params = None
     # ff_images = None
@@ -65,12 +64,12 @@ class StitchingSettings:
             "mcherry",
             "yfp",
             "fura",
-            '1',
-            '2',
-            '3',
-            '4',
-            '5',
-            '6'
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
         }
 
         if setup_num == 2:

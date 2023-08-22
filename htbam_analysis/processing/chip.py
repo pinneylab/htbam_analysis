@@ -13,7 +13,7 @@ import gc
 import warnings
 from copy import deepcopy
 from collections import namedtuple
-from htbam.image.processing import experiment
+from htbam_analysis.processing import experiment
 
 import numpy as np
 import numpy.ma as ma
@@ -384,7 +384,6 @@ class ChipImage:
 
 
 class Stamp:
-
     chamberrad = 16
     outerchamberbound = 5
     circlePara1Index = 50
