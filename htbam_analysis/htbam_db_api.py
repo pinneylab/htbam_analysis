@@ -46,8 +46,8 @@ class LocalHtbamDBAPI(AbstractHtbamDBAPI):
 
         self._init_json_dict()
         self._load_std_data()
-        # self._load_kinetic_data()
-        # self._load_button_quant_data()
+        self._load_kinetic_data()
+        self._load_button_quant_data()
 
 
     def _init_json_dict(self) -> None:
@@ -160,3 +160,20 @@ class LocalHtbamDBAPI(AbstractHtbamDBAPI):
         "std_button_Button_Quant", "indices"]].drop_duplicates(subset=["indices"]).set_index("indices")
 
         self._json_dict["button_quant"] = unique_buttons.to_dict("index")  
+
+    def __repr__(self) -> str:
+        def recursive_string(d: dict, indent: int, width=5) -> str:
+            s = "\t"*indent + '{\n'
+            for i, (key, value) in enumerate(d.items()):
+                if i == width:
+                    s += "\t"*indent +"...\n"
+                    break
+                s += "\t"*indent + f"{key}: "
+                if isinstance(value, dict):
+                    s += "\n" + recursive_string(value, indent+1)
+                else:
+                    s += f"{value}\n"
+            s += "\t"*indent + '}\n'
+            return s
+        
+        return recursive_string(self._json_dict, 0)
