@@ -78,7 +78,7 @@ class LocalHtbamDBAPI(AbstractHtbamDBAPI):
             assays: {
                 1: {
                     conc: float,
-                    time_s: [0],
+                    _s: [0],time
                     chambers: {
                         1,1: {
                             sum_chamber: [...],
@@ -97,7 +97,7 @@ class LocalHtbamDBAPI(AbstractHtbamDBAPI):
         std_assay_dict = {}
         for prod_conc, subset in self._standard_data.groupby("concentration_uM"):
             squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=['sum_chamber', 'std_chamber'])
-            squeezed["time_s"] = 0
+            squeezed["time_s"] = pd.Series([[0]]*len(squeezed), index=squeezed.index) #this tomfoolery is used to create a list with a single value, 0, for the standard curve assays.
             std_assay_dict[i] = {
                 "conc": prod_conc,
                 "time_s": squeezed.iloc[0]["time_s"],
