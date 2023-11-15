@@ -31,7 +31,7 @@ def _squeeze_df(df: pd.DataFrame, grouping_index: str, squeeze_targets: List[str
 class LocalHtbamDBAPI(AbstractHtbamDBAPI):
    
 
-    def __init__(self, standard_curve_data_path: str, standard_name: str, standard_type: str, standard_units: str, kinetic_data_path: str):
+    def __init__(self, standard_curve_data_path: str, standard_name: str, standard_type: str, standard_units: str, kinetic_data_path: str, kinetic_name: str, kinetic_type: str, kinetic_units: str):
         super().__init__()
         
         self._standard_data = pd.read_csv(standard_curve_data_path)
@@ -41,6 +41,9 @@ class LocalHtbamDBAPI(AbstractHtbamDBAPI):
         self._standard_data['indices'] = self._standard_data.x.astype('str') + ',' + self._standard_data.y.astype('str')
         
         self._kinetic_data = pd.read_csv(kinetic_data_path)
+        self._kinetic_name = kinetic_name
+        self._kinetic_type = kinetic_type
+        self._kinetic_units = kinetic_units
         self._kinetic_data['indices'] = self._kinetic_data.x.astype('str') + ',' + self._kinetic_data.y.astype('str')
 
 
@@ -107,12 +110,35 @@ class LocalHtbamDBAPI(AbstractHtbamDBAPI):
             "type": self._standard_type,
             "conc_unit": self._standard_units,
             "assays": std_assay_dict
-        }
+            }
         }
 
     def _load_kinetic_data(self) -> None:
         '''
         Populates an json_dict with kinetic data with the following schema:
+        {kinetics_run_#: {
+            name: str,
+            type: str,
+            conc_unit: str,
+            assays: {
+                1: {
+                    conc: float,
+                    time_s: [0],
+                    chambers: {
+                        1,1: {
+                            sum_chamber: [...],
+                            std_chamber: [...]
+                        },
+                        ...
+                        }}}}
+
+                Parameters:
+                        None
+
+                Returns:
+                        None
+        
+                        
         {kintetcs: {
             substrate_conc: {
                 time_s: [0,1, ...],
@@ -130,13 +156,49 @@ class LocalHtbamDBAPI(AbstractHtbamDBAPI):
                 Returns:
                         None
         '''    
+        # kin_dict = {}
+        # for sub_conc, subset in self._kinetic_data.groupby("series_index"):
+        #     squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=["time_s", "sum_chamber", "std_chamber"])
+        #     kin_dict[sub_conc] = {
+        #         "time_s": squeezed.iloc[0]["time_s"],
+        #         "chambers": squeezed.drop(columns=["time_s", "indices"]).to_dict("index")}
+            
+        # self._json_dict["kinetics"] = kin_dict
+
+        def parse_concentration(conc_str: str):
+            '''
+            Currently, we're storing substrate concentration as a string in the kinetics data.
+            This will be changed in the future to store as a float + unit as a string. For now,
+            we will parse jankily.
+            '''
+            print('Warning: parsing concentration from string')
+            #first, remove the unit and everything following
+            conc = conc_str.split(self._kinetic_units)[0]
+            #concentration number uses underscore as decimal point. Here, we replace and convert to a float:
+            conc = float(conc.replace("_", "."))
+            return conc
+            
+
+        i = 0    
         kin_dict = {}
         for sub_conc, subset in self._kinetic_data.groupby("series_index"):
-            squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=["time_s", "sum_chamber", "std_chamber"])
-            kin_dict[sub_conc] = {"time_s": squeezed.iloc[0]["time_s"],
-            "chambers": squeezed.drop(columns=["time_s", "indices"]).to_dict("index")}
-            
-        self._json_dict["kinetics"] = kin_dict
+            squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=["time_s",'sum_chamber', 'std_chamber'])
+            #squeezed["time_s"] = 0
+            kin_dict[i] = {
+                "conc": parse_concentration(sub_conc),
+                "time_s": squeezed.iloc[0]["time_s"],
+                "chambers": squeezed.drop(columns=["time_s", "indices"]).to_dict("index")}
+            i += 1
+
+        kinetics_run_num = len([key for key in self._json_dict if "kinetics_" in key])
+        if "runs" not in self._json_dict:
+            self._json_dict["runs"] = {}
+        self._json_dict["runs"][f"kinetics_{kinetics_run_num}"] = {
+            "name": self._kinetic_name,
+            "type": self._kinetic_type,
+            "conc_unit": self._kinetic_units,
+            "assays": kin_dict
+        }
 
     def _load_button_quant_data(self) -> None:
         '''
