@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod, abstractproperty
 import pandas as pd
 from typing import List, Tuple
 import numpy as np
+import json
+
 class AbstractHtbamDBAPI(ABC):
     def __init__(self):
         pass
@@ -239,3 +241,8 @@ class LocalHtbamDBAPI(AbstractHtbamDBAPI):
             return s
         
         return recursive_string(self._json_dict, 0)
+    
+    def export_json(self):
+        '''This writes the database to file, as a dict -> json'''
+        with open('db.json', 'w') as fp:
+            json.dump(self._json_dict, fp, indent=4)
