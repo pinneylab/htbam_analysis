@@ -86,3 +86,5 @@ __pycache__/
 .coverage
 coverage.svg
 *.egg-info/
+
+build/
