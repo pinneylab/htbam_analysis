@@ -2,10 +2,9 @@
 Duncan Muir & Nicholas Freitas
 Credits: Daniel Mohktari and Scott Longwell
 ___
-![BuildStatus](https://github.com/pinneylab/htbam_analysis/workflows/Test/badge.svg)
+![BuildStatus](https://github.com/pinneylab/htbam_analysis/actions/workflows/ci.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
-[![codecov](https://codecov.io/gh/pinneylab/htbam_analysis/branch/main/graph/badge.svg?token=OG0TE7GYLF)](https://codecov.io/gh/pinneylab/htbam_analysis)
-
+[![codecov](https://codecov.io/gh/pinneylab/htbam_analysis/graph/badge.svg?token=DWPK36TQQS)](https://codecov.io/gh/pinneylab/htbam_analysis)
 
 ## Overview
 
