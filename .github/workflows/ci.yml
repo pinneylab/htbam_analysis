@@ -23,7 +23,7 @@ jobs:
           pip install .
       - name: Test with unittest
         run: | 
-          coverage run --source=htbam_analysis -m unittest test/test*.py
+          coverage run --source=src -m unittest test/test*.py
       - name: Upload coverage reports to Codecov
         run: | 
           curl -Os https://uploader.codecov.io/latest/linux/codecov
