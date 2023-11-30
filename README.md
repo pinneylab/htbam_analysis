@@ -1,5 +1,6 @@
 # htbam_analysis
 Duncan Muir & Nicholas Freitas
+
 Credits: Daniel Mohktari and Scott Longwell
 ___
 ![BuildStatus](https://github.com/pinneylab/htbam_analysis/actions/workflows/ci.yml/badge.svg)
@@ -19,3 +20,4 @@ ___
     - `$ pip install -e .`
 
 ### For stable code, install version via wheel file
+[here](https://github.com/pinneylab/htbam_analysis/releases)
