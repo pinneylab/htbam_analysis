@@ -10,10 +10,8 @@ from tqdm import tqdm
 from matplotlib import pyplot as plt
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter
-
-## DEPRECATED: due to M2 issues
-# from basicpy import BaSiC
-# from basicpy import datasets as bdata
+from basicpy import BaSiC
+from basicpy import datasets as bdata
 
 
 def ff_subtract(i, ffi, ff_bval, ff_scale):
@@ -55,165 +53,168 @@ class Raster(ABC):
     def params(self):
         return self._params
 
-    # def apply_ff(self):
-    #     """
-    #     Applies flat-field correction to fetched images
+    def apply_ff(self):
+        """
+        Applies flat-field correction to fetched images
 
-    #     Arguments:
-    #         None
+        Arguments:
+            None
 
-    #     Returns:
-    #         None
+        Returns:
+            None
 
-    #     """
-    #     channel = self._params.channel
-    #     exposure = self._params.exposure
-    #     ff_image = StitchingSettings.ff_images[channel]
-    #     ff_params = StitchingSettings.ff_params[channel][exposure]
-    #     ff_bval = ff_params[0]
-    #     ff_scale = ff_params[1]
+        """
+        raise NotImplementedError("Functionality not ready yet.")
+        channel = self._params.channel
+        exposure = self._params.exposure
+        ff_image = StitchingSettings.ff_images[channel]
+        ff_params = StitchingSettings.ff_params[channel][exposure]
+        ff_bval = ff_params[0]
+        ff_scale = ff_params[1]
 
-    #     return [ff_subtract(i, ff_image, ff_bval, ff_scale) for i in self._images]
+        return [ff_subtract(i, ff_image, ff_bval, ff_scale) for i in self._images]
 
-    # def applyFF_BaSiC(self):
-    #     """
-    #     Applies flat-field correction to fetched images using BaSiC. This technique simulates a FF and
-    #     dark image based on common shared features across the full raster (e.g. 64 images).
+    def applyFF_BaSiC(self):
+        """
+        Applies flat-field correction to fetched images using BaSiC. This technique simulates a FF and
+        dark image based on common shared features across the full raster (e.g. 64 images).
 
-    #     This version uses gaussian smoothing after fitting.
+        This version uses gaussian smoothing after fitting.
 
-    #     Implemented in v2.1.0 by Peter Suzuki, Youngbin Lim
+        Implemented in v2.1.0 by Peter Suzuki, Youngbin Lim
 
-    #     Arguments:
-    #         None
+        Arguments:
+            None
 
-    #     Returns:
-    #         None
+        Returns:
+            None
 
-    #     """
-    #     print("Running BaSiC for FF correction...")
+        """
+        print("Running BaSiC for FF correction...")
 
-    #     # Load images
-    #     imgarray = []
-    #     for img in self._images:
-    #         # print(img.shape)
-    #         imgarray.append(img)
-    #     images = np.asarray(imgarray)
+        # Load images
+        imgarray = []
+        for img in self._images:
+            # print(img.shape)
+            imgarray.append(img)
+        images = np.asarray(imgarray)
 
-    #     # Initialize BaSiC and train
-    #     basic = BaSiC(get_darkfield=False, smoothness_flatfield=1)
-    #     basic.fit(images)
+        # Initialize BaSiC and train
+        basic = BaSiC(get_darkfield=False, smoothness_flatfield=1)
+        basic.fit(images)
 
-    #     # Smooth FF image and apply transform to each raw image
-    #     ffImage = gaussian_filter(basic.flatfield, sigma=50)
-    #     # StitchingSettings.ffImages[self.params.channel] = ffImage # save ffImage to settings
+        # Smooth FF image and apply transform to each raw image
+        ffImage = gaussian_filter(basic.flatfield, sigma=50)
+        # StitchingSettings.ffImages[self.params.channel] = ffImage # save ffImage to settings
 
-    #     ffbval = 0
-    #     ffscale = 1
+        ffbval = 0
+        ffscale = 1
 
-    #     manual_smoothed = [ff_subtract(i, ffImage, ffbval, ffscale) for i in imgarray]
+        manual_smoothed = [ff_subtract(i, ffImage, ffbval, ffscale) for i in imgarray]
 
-    #     fig, axes = plt.subplots(1, 3, figsize=(9, 3))
-    #     im = axes[0].imshow(basic.flatfield)
-    #     fig.colorbar(im, ax=axes[0])
-    #     axes[0].set_title("Flatfield")
-    #     im = axes[1].imshow(ffImage)
-    #     fig.colorbar(im, ax=axes[1])
-    #     axes[1].set_title("Smoothed FF")
-    #     axes[2].plot(basic.baseline)
-    #     axes[2].set_xlabel("Frame")
-    #     axes[2].set_ylabel("Baseline")
-    #     fig.tight_layout()
-    #     plt.show()
+        fig, axes = plt.subplots(1, 3, figsize=(9, 3))
+        im = axes[0].imshow(basic.flatfield)
+        fig.colorbar(im, ax=axes[0])
+        axes[0].set_title("Flatfield")
+        im = axes[1].imshow(ffImage)
+        fig.colorbar(im, ax=axes[1])
+        axes[1].set_title("Smoothed FF")
+        axes[2].plot(basic.baseline)
+        axes[2].set_xlabel("Frame")
+        axes[2].set_ylabel("Baseline")
+        fig.tight_layout()
+        plt.show()
 
-    #     return manual_smoothed
+        return manual_smoothed
 
-    # def applyFF_BaSiC_masked(self):
-    #     """
-    #     Applies flat-field correction to fetched images using BaSiC. This technique simulates a FF and
-    #     dark image based on common shared features across the full raster (e.g. 64 images).
+    def applyFF_BaSiC_masked(self):
+        """
+        Applies flat-field correction to fetched images using BaSiC. This technique simulates a FF and
+        dark image based on common shared features across the full raster (e.g. 64 images).
 
-    #     Current version fits a gaussian to the pixels and only uses pixels within 1 s.d. of the mean to
-    #     calculate BaSiC FF image. (Using a mask to cull which pixels are seen by BaSiC during training).
-    #     After fitting, images can be transformed using the FF image either with or w/out smoothing, with
-    #     default setting using gaussian smoothing to eliminate small (wrong) features learned by BaSiC.
+        Current version fits a gaussian to the pixels and only uses pixels within 1 s.d. of the mean to
+        calculate BaSiC FF image. (Using a mask to cull which pixels are seen by BaSiC during training).
+        After fitting, images can be transformed using the FF image either with or w/out smoothing, with
+        default setting using gaussian smoothing to eliminate small (wrong) features learned by BaSiC.
 
-    #     Implemented in v2.1.0 by Peter Suzuki, Youngbin Lim
+        Implemented in v2.1.0 by Peter Suzuki, Youngbin Lim
 
-    #     Arguments:
-    #         None
+        Arguments:
+            None
 
-    #     Returns:
-    #         None
+        Returns:
+            None
 
-    #     """
+        """
+        
+        raise NotImplementedError("Functionality not ready yet.")
 
-    #     print("Running BaSiC for FF correction, masking outlier pixels...")
+        print("Running BaSiC for FF correction, masking outlier pixels...")
 
-    #     # Load images
-    #     imgarray = []
-    #     for img in self._images:
-    #         # print(img.shape)
-    #         imgarray.append(img)
-    #     images = np.asarray(imgarray)
+        # Load images
+        imgarray = []
+        for img in self._images:
+            # print(img.shape)
+            imgarray.append(img)
+        images = np.asarray(imgarray)
 
-    #     ## Flatten and fit gaussian to background pixels
-    #     plt.figure(figsize=(6, 2))
+        ## Flatten and fit gaussian to background pixels
+        plt.figure(figsize=(6, 2))
 
-    #     data = images.flatten()
-    #     y, x, _ = plt.hist(data, 100, alpha=0.3, label="data")
-    #     x = (x[1:] + x[:-1]) / 2  # for len(x)==len(y)
+        data = images.flatten()
+        y, x, _ = plt.hist(data, 100, alpha=0.3, label="data")
+        x = (x[1:] + x[:-1]) / 2  # for len(x)==len(y)
 
-    #     def gauss(x, mu, sigma, A):
-    #         return A * np.exp(-((x - mu) ** 2) / 2 / sigma**2)
+        def gauss(x, mu, sigma, A):
+            return A * np.exp(-((x - mu) ** 2) / 2 / sigma**2)
 
-    #     expected = (30000, 5000, 1e7)  # , 20000, 5000, 125)
-    #     params, cov = curve_fit(gauss, x, y, expected)
-    #     x_fit = np.linspace(x.min(), x.max(), 100)
-    #     plt.plot(x_fit, gauss(x_fit, *params), color="red", lw=3, label="model")
-    #     plt.legend()
-    #     plt.title("Pixel intensity distribution")
-    #     plt.show()
+        expected = (30000, 5000, 1e7)  # , 20000, 5000, 125)
+        params, cov = curve_fit(gauss, x, y, expected)
+        x_fit = np.linspace(x.min(), x.max(), 100)
+        plt.plot(x_fit, gauss(x_fit, *params), color="red", lw=3, label="model")
+        plt.legend()
+        plt.title("Pixel intensity distribution")
+        plt.show()
 
-    #     # Set mask bounds to train only on background
-    #     top = params[0] + abs(3 * params[1])  # mean + 3sd
-    #     bottom = params[0] - abs(3 * params[1])
-    #     mask = np.zeros(images.shape)
-    #     mask = (images < top) & (
-    #         images > bottom
-    #     )  # threshold for defining bright things defined by mean + 3 s.d.
-    #     print(params)
-    #     print(top)
-    #     print(bottom)
-    #     # masked = mask*images
+        # Set mask bounds to train only on background
+        top = params[0] + abs(3 * params[1])  # mean + 3sd
+        bottom = params[0] - abs(3 * params[1])
+        mask = np.zeros(images.shape)
+        mask = (images < top) & (
+            images > bottom
+        )  # threshold for defining bright things defined by mean + 3 s.d.
+        print(params)
+        print(top)
+        print(bottom)
+        # masked = mask*images
 
-    #     # Initialize BaSiC and train
-    #     basic_mask = BaSiC(get_darkfield=False, smoothness_flatfield=1)
-    #     basic_mask.fit(images, fitting_weight=mask)
+        # Initialize BaSiC and train
+        basic_mask = BaSiC(get_darkfield=False, smoothness_flatfield=1)
+        basic_mask.fit(images, fitting_weight=mask)
 
-    #     # Smooth FF image and apply transform to each raw image
-    #     ffImage = gaussian_filter(basic_mask.flatfield, sigma=50)
-    #     # StitchingSettings.ffImages[self.params.channel] = ffImage # save ffImage to settings
+        # Smooth FF image and apply transform to each raw image
+        ffImage = gaussian_filter(basic_mask.flatfield, sigma=50)
+        # StitchingSettings.ffImages[self.params.channel] = ffImage # save ffImage to settings
 
-    #     ffbval = 0
-    #     ffscale = 1
+        ffbval = 0
+        ffscale = 1
 
-    #     manual_smoothed = [ff_subtract(i, ffImage, ffbval, ffscale) for i in imgarray]
+        manual_smoothed = [ff_subtract(i, ffImage, ffbval, ffscale) for i in imgarray]
 
-    #     fig, axes = plt.subplots(1, 3, figsize=(9, 3))
-    #     im = axes[0].imshow(basic_mask.flatfield)
-    #     fig.colorbar(im, ax=axes[0])
-    #     axes[0].set_title("Flatfield")
-    #     im = axes[1].imshow(ffImage)
-    #     fig.colorbar(im, ax=axes[1])
-    #     axes[1].set_title("Smoothed FF")
-    #     axes[2].plot(basic_mask.baseline)
-    #     axes[2].set_xlabel("Frame")
-    #     axes[2].set_ylabel("Baseline")
-    #     fig.tight_layout()
-    #     plt.show()
+        fig, axes = plt.subplots(1, 3, figsize=(9, 3))
+        im = axes[0].imshow(basic_mask.flatfield)
+        fig.colorbar(im, ax=axes[0])
+        axes[0].set_title("Flatfield")
+        im = axes[1].imshow(ffImage)
+        fig.colorbar(im, ax=axes[1])
+        axes[1].set_title("Smoothed FF")
+        axes[2].plot(basic_mask.baseline)
+        axes[2].set_xlabel("Frame")
+        axes[2].set_ylabel("Baseline")
+        fig.tight_layout()
+        plt.show()
 
-    #     return manual_smoothed
+        return manual_smoothed
 
     def stitch(self, method="cut"):
         """
@@ -265,15 +266,15 @@ class Raster(ABC):
             border = slice(margin, -margin)
 
         tiles = self._images
-        # if self.params.auto_ff and self.params.ff_type == "BaSiC":
-        #     tiles = self.ffCorrectedImages = self.applyFF_BaSiC()
-        #     print("completed BaSiC FF correction")
+        if self.params.auto_ff and self.params.ff_type == "BaSiC":
+            tiles = self.ffCorrectedImages = self.applyFF_BaSiC()
+            print("completed BaSiC FF correction")
 
-        #     logging.info(
-        #         "BaSiC Flat-Field Corrected Image | Ch: {}, Exp: {}".format(
-        #             self.params.channel, self.params.exposure
-        #         )
-        #     )
+            logging.info(
+                "BaSiC Flat-Field Corrected Image | Ch: {}, Exp: {}".format(
+                    self.params.channel, self.params.exposure
+                )
+            )
 
         # elif self.params.auto_ff and self.params.ff_type == "BaSiC_masked":
         #     tiles = self.ffCorrectedImages = self.applyFF_BaSiC_masked()

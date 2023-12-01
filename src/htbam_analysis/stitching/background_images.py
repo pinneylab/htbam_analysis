@@ -126,7 +126,7 @@ class BackgroundImages:
         parse = lambda f: tuple(f.split(".")[0].split("_")[-3:])
 
         for root, dirs, files in os.walk(path):
-            if "StitchedImages" in root:
+            if ("StitchedImages" in root) | ("Analysis" in root):
                 to_correct = {
                     parse(f): os.path.join(root, f) for f in files if correctable(f)
                 }

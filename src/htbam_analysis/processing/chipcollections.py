@@ -103,7 +103,7 @@ class ChipSeries:
                 record = {int(path.stem.split("_")[-1]): path for path in img_paths}
             except ValueError:
                 logging.info("WARNING: Coerced image indexes to floats")
-                record = {float(path.stem.split("_")[-1]): path for path in img_paths}
+                record = {float(path.stem.split("_")[-1].replace("-", ".")): path for path in img_paths}
             chipParams = (self.device.corners, self.device.pinlist, channel, exposure)
             self.chips = {
                 identifier: ChipImage(
