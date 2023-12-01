@@ -2,6 +2,8 @@
 # import pytest
 # from imagestitcher import stitching_settings, rastering, scripts
 
+def fake_test():
+    assert 1==1
 
 # def test_walk_and_stitch():
 #     """
