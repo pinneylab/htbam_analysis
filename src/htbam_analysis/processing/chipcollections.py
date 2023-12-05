@@ -1107,7 +1107,7 @@ class ButtonChamberAssaySeries:
                     )
             if featuretype == "button":
                 try:
-                    s.process(self.button_ref)
+                    s.process(self.button_ref, featuretype='button')
                 except:
                     raise ValueError(
                         "No button ref provided (did you provice chamber ref instead?)"
@@ -1150,7 +1150,7 @@ class ButtonChamberAssaySeries:
         """
 
         if not outPath:
-            outPath = self.chamber_root
+            outPath = self.root
         df = self.summarize()
         fn = "{}_{}.csv.bz2".format(
             self.device.dname, "ButtonChamberAssaySeries_Analysis"
@@ -1159,7 +1159,7 @@ class ButtonChamberAssaySeries:
 
     def __str__(self):
         return "Assays: {}, ..., Device: {}, Channels: {}".format(
-            list(self.assays.keys())[0], str((self.device.setup, self.device.dname))
+            list(self.assays.keys())[0], str((self.device.setup, self.device.dname)), str(self.channels)
         )
 
     def _repr_pretty_(self, p, cycle=True):
