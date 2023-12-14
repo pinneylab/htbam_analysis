@@ -844,7 +844,7 @@ class AssaySeries:
         files = {
             (handle, desc): p(handle) for handle, desc in zip(file_handles, descriptors)
         }
-
+        
         self.load_kin(descriptors, files.values(), channel, exposure)
 
     def parse_quantificationFolders(

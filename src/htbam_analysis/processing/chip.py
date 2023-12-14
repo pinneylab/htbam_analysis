@@ -980,6 +980,7 @@ class Button:
             "summed_button",
             "summed_button_BGsub",
             "std_button",
+            "mean_button",
             "x_button_center",
             "y_button_center",
             "radius_button_disk",
@@ -988,6 +989,7 @@ class Button:
             "median_button_annulus",
             "summed_button_annulus_normed",
             "std_button_annulus_localBG",
+            "mean_annulus",
             "inner_radius_button_annulus",
             "outer_radius_button_annulus",
         ]
@@ -1005,9 +1007,11 @@ class Button:
         medI_disk = int(ma.median(disk))
         sumI_disk = int(disk.sum())
         sdI_disk = int(disk.std())
+        meanI_disk = int(disk.mean())
         medI_ann = int(ma.median(annulus))
         sumI_ann_normed = int(annulus.sum() / self.annulus_to_disk_ratio)
         sdI_ann = int(annulus.std())
+        meanI_ann = int(annulus.mean())
         sumI_BGsub = sumI_disk - sumI_ann_normed
 
         vals_disk = [
@@ -1015,6 +1019,7 @@ class Button:
             sumI_disk,
             sumI_BGsub,
             sdI_disk,
+            meanI_disk,
             self.center[0],
             self.center[1],
             self.disk_radius,
@@ -1023,6 +1028,7 @@ class Button:
             medI_ann,
             sumI_ann_normed,
             sdI_ann,
+            meanI_ann,
             self.annulus_radii[0],
             self.annulus_radii[1],
         ]
