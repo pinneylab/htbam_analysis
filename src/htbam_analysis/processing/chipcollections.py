@@ -18,6 +18,7 @@ import pandas as pd
 
 from tqdm import tqdm
 from skimage import io
+import re
 
 from htbam_analysis.processing.chip import ChipImage
 
@@ -85,7 +86,6 @@ class ChipSeries:
 
         self.series_root = root
 
-        # TODO FIGURE OUT THIS FUCKING GARBAGE
         glob_pattern = "*BGSubtracted_StitchedImg*.tif"
         if custom_glob:
             glob_pattern = custom_glob
@@ -97,13 +97,18 @@ class ChipSeries:
                 for i in list(r.glob(glob_pattern))
                 if not "ChamberBorders" in i.stem or "Summary" in i.stem
             ]
+            if len(img_files) < 1:
+                raise ProcessingException(f"No images found! Looked in directory \"{root}\" for images that matched the pattern: \"{glob_pattern}\"")
             img_files = [img for img in img_files if img.parts[-1][0] != "."]
             img_paths = [Path(os.path.join(r.parent, img)) for img in img_files]
-            try:
-                record = {int(path.stem.split("_")[-1]): path for path in img_paths}
-            except ValueError:
-                logging.info("WARNING: Coerced image indexes to floats")
-                record = {float(path.stem.split("_")[-1].replace("-", ".")): path for path in img_paths}
+            pattern= re.compile("^[a-z|A-Z]*(_[0-9]*){1,4}$")
+            for img in img_paths:
+                if pattern.match(img.stem):
+                    pass
+                else:
+                    raise ProcessingException(f"Malformed image name found \"{img.stem}\". Make sure any decimals in concentration are replaced with underscores.")
+            
+            record = {float(".".join(re.sub("^([A-Z|a-z]*_){1,2}", "", path.stem).split("_")[2:])): path for path in img_paths}
             chipParams = (self.device.corners, self.device.pinlist, channel, exposure)
             self.chips = {
                 identifier: ChipImage(
@@ -111,8 +116,9 @@ class ChipSeries:
                 )
                 for identifier, source in record.items()
             }
-
+            
             keys = list(self.chips.keys())
+            print(keys)
             logging.debug("Loaded Series | Root: {}/, IDs: {}".format(root, keys))
 
     def summarize(self):
@@ -1164,3 +1170,6 @@ class ButtonChamberAssaySeries:
 
     def _repr_pretty_(self, p, cycle=True):
         p.text("<{}>".format(self.__str__()))
+
+class ProcessingException(Exception):
+    pass
