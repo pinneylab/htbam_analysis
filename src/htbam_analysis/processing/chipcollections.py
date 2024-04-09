@@ -101,7 +101,7 @@ class ChipSeries:
                 raise ProcessingException(f"No images found! Looked in directory \"{root}\" for images that matched the pattern: \"{glob_pattern}\"")
             img_files = [img for img in img_files if img.parts[-1][0] != "."]
             img_paths = [Path(os.path.join(r.parent, img)) for img in img_files]
-            pattern= re.compile("^[a-z|A-Z]*(_[0-9]*){1,4}$")
+            pattern= re.compile("^([a-z|A-Z]*_){1,2}([0-9]*_){1,3}[0-9]*$")
             for img in img_paths:
                 if pattern.match(img.stem):
                     pass

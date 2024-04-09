@@ -123,7 +123,7 @@ class BackgroundImages:
             and not ("BGSubtracted" in f)
         )
 
-        parse = lambda f: tuple(f.split(".")[0].split("_")[-3:])
+        parse = lambda f: tuple(f.split(".")[0].split("_")[1:3] + [".".join(f.split(".")[0].split("_")[3:])])
 
         for root, dirs, files in os.walk(path):
             if ("StitchedImages" in root) | ("Analysis" in root):
