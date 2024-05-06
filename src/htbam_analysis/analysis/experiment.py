@@ -1,21 +1,28 @@
 from typing import List, Tuple
 import numpy as np
+import pandas as pd
+import csv
 import json
+import os
 import scipy
 from tqdm import tqdm
 from htbam_db_api.htbam_db_api import AbstractHtbamDBAPI
 from htbam_analysis.analysis.plotting import plot_chip
 from sklearn.linear_model import LinearRegression
+import inspect
 import seaborn as sns
 from copy import deepcopy
+from scipy.optimize import curve_fit
 
-
-CURRENT_VERSION = "0.0.1"
 
 class HTBAMExperiment:
     def __init__(self, db_connection: AbstractHtbamDBAPI):
         self._db_conn = db_connection
+        print("\nConnected to database.")
+        print("Experiment found with the following runs:")
+        print(self._db_conn.get_run_names())
         self._run_data = {}
+
 
 
     def fit_standard_curve(self, run_name: str):
@@ -336,18 +343,11 @@ class HTBAMExperiment:
         filtered_initial_slopes = deepcopy(initial_slopes)
         for filter in filters: filtered_initial_slopes *= filter
 
-        assay_dict = {"filters": filter_names}
+        assay_dict = {"filters": filters}
         assay_dict.update({filter_names[i]: filter_values[i] for i in range(len(filter_names))})
 
         # #initialize the dictionary
-        # self._json_dict['runs'][run_name]['analyses'][assay_type] = {
-        #         'filters': ['filter_r2', 'filter_enzyme_expression', 'filter_initial_rate_R2', 'filter_positive_initial_slope'],
-        #         'filter_r2': r2_threshold,
-        #         'filter_enzyme_expression': expression_threshhold,
-        #         'filter_enzyme_expression_units': expression_threshhold_units,
-        #         'filter_initial_rate_R2': intitial_rate_R2_threshhold,
-        #         'filter_positive_initial_slope': True,
-        #         'assays': {}} 
+       
         assay_data = {}
         for i in range(conc_count):
             assay_data[i] = {
@@ -362,6 +362,417 @@ class HTBAMExperiment:
 
         assay_dict["assays"] = assay_data
         self._db_conn.add_filtered_assay(kinetic_run_name, 'filtered_initial_rates', assay_dict)
+
+    def plot_filtered_initial_rates_chip(self, run_name: str, time_to_plot=0.3):
+        ###N.B.: May be some bug here, because some of the filtered-out chambers are still showing slopes.
+        # I think they should have all nans...?
+
+        initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
+        initial_rate_intercepts_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'intercepts')
+        initial_rate_masks_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'mask') 
+        initial_rate_arr = np.array(list(initial_rates_dict.values()))
+        initial_rate_intercepts_arr = np.array(list(initial_rate_intercepts_dict.values()))
+        initial_rate_masks_arr = np.array(list(initial_rate_masks_dict.values()))
+
+
+        filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
+        filtered_initial_slopes = deepcopy(initial_rate_arr)
+        for filter in filters: filtered_initial_slopes *= filter
+        
+        chamber_names_dict = self._db_conn.get_chamber_name_dict()
+
+        #Let's plot as before:
+        #plotting variable: We'll plot by luminance. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
+        # TODO: I don't think this is what freitas intended, but will probably work for now. revisit.
+        filtered_initial_rates_to_plot = {i: np.nanmax(j) for i, j in initial_rates_dict.items()}
+
+
+        #chamber_names: Same as before.
+
+        #plotting function: We'll generate a subplot for each chamber, showing the raw data and the linear regression line.
+        # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
+
+        def plot_chamber_filtered_initial_rates(chamber_id, ax, time_to_plot=time_to_plot):
+            #N.B. Every so often, slope and line colors don't match up. Not sure why.
+            #parameters: what amount of total time to plot? First 20%?
+        
+            #convert from 'x,y' to integer index in the array:
+            data_index = list(self._run_data[run_name]["chamber_idxs"]).index(chamber_id)
+            x_data = self._run_data[run_name]["time_data"][:,0]
+            y_data = self._run_data[run_name]["product_concentration"][:,data_index,:].T
+            
+            #plot only first X% of time:
+            max_time = np.nanmax(x_data)
+            time_to_plot = max_time*time_to_plot
+            time_idxs_to_plot = x_data < time_to_plot
+            x_data = x_data[time_idxs_to_plot]
+            y_data = y_data[:, time_idxs_to_plot]
+            
+            #get slope from the analysis:
+            current_chamber_slopes = filtered_initial_slopes[data_index,:]
+            #calculate y-intercept by making sure it intersects first point:
+            current_chamber_intercepts = initial_rate_intercepts_arr[data_index,:]
+            # get regressed point mask:
+            current_chamber_reg_mask = initial_rate_masks_arr[data_index,:][:,:len(x_data)]
+            
+            colors = sns.color_palette('husl', n_colors=y_data.shape[0])
+
+            #print(y_data.shape[0])
+            for i in range(y_data.shape[0]): #over each concentration:
+                
+                ax.scatter(x_data, y_data[i,:], color=colors[i], alpha=0.3)
+                ax.scatter(x_data[current_chamber_reg_mask[i]], y_data[i, current_chamber_reg_mask[i]], color=colors[i], alpha=1, s=50)
+                
+                m = current_chamber_slopes[i]
+                b = current_chamber_intercepts[i]
+                if not (np.isnan(m) or np.isnan(b)):
+                    #return False, no_update, no_update
+                    ax.plot(x_data, m*np.array(x_data) + b, color=colors[i])
+            return ax
+
+            
+
+        ### PLOT THE CHIP: now, we plot
+        plot_chip(filtered_initial_rates_to_plot, chamber_names_dict, graphing_function=plot_chamber_filtered_initial_rates, title='Kinetics: Filtered Initial Rates (Max)')
+        print('{}/1792 wells pass our filters.'.format( np.sum([x for x in filtered_initial_rates_to_plot.values()]) ) )
+
+
+    def fit_ic50s(self, run_name: str, inhibition_model = None):
+
+        if inhibition_model is None:
+            # default model
+            def inhibition_model(x, r_max, r_min, ic50):
+                return r_min + (r_max-r_min)/(1+(x/ic50))
+        
+        arg_list = str(inspect.signature(inhibition_model)).strip("()").replace(" ", "").split(",")
+
+        # get data
+        initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
+        initial_rate_arr = np.array(list(initial_rates_dict.values()))
+        chamber_idxs = list(initial_rates_dict.keys())
+      
+        filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
+        filtered_initial_slopes = deepcopy(initial_rate_arr)
+        for filter in filters: filtered_initial_slopes *= filter
+
+        #Here, we calculate the IC50 for each chamber.
+        ic50_array = np.array([])
+        ic50_error_array = np.array([])
+        fit_params = []
+        fit_params_errs = []
+        _count = 0
+        for i in range(len(chamber_idxs)):
+            current_slopes = filtered_initial_slopes[i, :]
+
+            if np.all(np.isnan(current_slopes)):
+                #print('Chamber {} has no slopes!'.format(chamber_idxs[i]))
+                ic50_array = np.append(ic50_array, np.nan)
+                ic50_error_array = np.append(ic50_error_array, np.nan)
+                fit_params.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                fit_params_errs.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                _count += 1
+                continue
+
+            #get indices of non-nan values:
+            non_nan_idxs = np.where(~np.isnan(current_slopes))[0]
+            
+            current_slopes = current_slopes[non_nan_idxs]
+            current_concs = self._run_data[run_name]["conc_data"][non_nan_idxs]
+
+            if len(current_slopes) < 3:
+                #print('Chamber {} has fewer than 3 slopes!'.format(chamber_idxs[i]))
+                ic50_array = np.append(ic50_array, np.nan)
+                ic50_error_array = np.append(ic50_error_array, np.nan)
+                fit_params.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                fit_params_errs.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                _count += 1
+                continue
+
+            max_normed_slopes = current_slopes / np.nanmax(current_slopes)
+            #kinetics.fit_and_plot_micheaelis_menten(current_slopes, current_slopes, current_concs, enzyme_concentration_converted_units[i], 'uM', 'MM for first chamber!')
+            #K_i, std_err = kinetics.fit_inhibition_constant(max_normed_slopes, max_normed_slopes, current_concs, enzyme_concentration_converted_units[i], 'uM', 'MM for first chamber!')
+
+            p_opt, p_cov = curve_fit(inhibition_model, current_concs, max_normed_slopes)
+            param_dict = {i:j for i,j in zip(arg_list[1:], p_opt)}
+
+            if "ic50" not in param_dict.keys():
+                raise ValueError("Inhibition model must have an 'ic50' parameter.")
+            
+            ic50 = param_dict["ic50"]
+            fit_err = np.sqrt(np.diag(p_cov))
+            param_error_dict = {i:j for i,j in zip(arg_list[1:], fit_err)}
+        
+            ic50_err = param_error_dict["ic50"]
+
+            ic50_array = np.append(ic50_array, ic50)
+            ic50_error_array = np.append(ic50_error_array, ic50_err)
+            fit_params.append(param_dict)
+            fit_params_errs.append(param_error_dict)
+        # chamber_idxs, luminance_data, conc_data, time_data
+
+        for i, chamber_idx in enumerate(chamber_idxs):
+            self._db_conn.add_analysis(run_name, 'ic50_raw', chamber_idx,  {'ic50': ic50_array[i], 
+                                                                            'ic50_error': ic50_error_array[i],
+                                                                            'fit_params': fit_params[i],
+                                                                            'fit_params_errs': fit_params_errs[i]} )
+        print(f'{_count} chambers had fewer than 3 slopes and were not fit.')
+
+    def filter_ic50s(self, 
+                     run_name,
+                     z_score_threshold_ic50 = 1.5,
+                     z_score_threshold_expression = 1.5,
+                     save_intermediate_data = False):
+
+        ic50_array = np.array(list(self._db_conn.get_analysis(run_name, 'ic50_raw', 'ic50').values()))
+        enzyme_concentration = self._run_data[run_name]["enzyme_concentration"]
+
+        #Get chamber ids from metadata:
+       
+        #Get chamber ids from metadata:
+        chamber_names_dict = self._db_conn.get_chamber_name_to_id_dict()
+
+        #Get average k_cat, k_M, and v_max for each sample:
+        sample_names = np.array([])
+        sample_ic50 = np.array([])
+        sample_ic50_error = np.array([])
+        sample_ic50_replicates = []
+
+        # #Get z-scores for each well (used to filter in the next step!)
+        # ic50_zscores = np.array([])
+        # enzyme_concentration_zscores = np.array([])
+
+        export_list1=[]
+        #For each sample, 
+        for name, ids in chamber_names_dict.items():
+            
+
+            ### GATHER MM PARAMETERS OF REPLICATES FOR EACH SAMPLE: ###
+            #get indices of idxs in chamber_idxs:
+            idxs = [list(self._run_data[run_name]["chamber_idxs"]).index(x) for x in ids]
+
+            #get values for those indices:
+            ic50s = ic50_array[idxs]
+
+            #keep track of which wells we exclude later:
+            ic50_replicates = np.array(ids)
+
+            #if any of these is all nans, just continue to avoid errors:
+            if np.all(np.isnan(ic50s)):
+                print('No values from sample {}, all pre-filtered.'.format(name))
+                continue
+
+            ### FILTER OUT OUTLIERS: ###
+            #calculate z-score for each value:
+            ic50_zscore = (ic50s - np.nanmean(ic50s))/np.nanstd(ic50s)
+
+            #also, get z-score of enzyme expression for each well:
+            enzyme_concentration_zscore = (enzyme_concentration[idxs] - np.nanmean(enzyme_concentration[idxs]))/np.nanstd(enzyme_concentration[idxs]) #in units of 'substrate_conc_unit' 
+
+            #First, for enzyme expression outliers, set the value to NaN to be filtered in the final step:
+            ic50s[np.abs(enzyme_concentration_zscore) > z_score_threshold_expression] = np.nan
+
+            #filter out values with z-score > threshhold:
+            ic50s = ic50s[np.abs(ic50_zscore) < z_score_threshold_ic50]
+
+            #do the same for the replicates ids:
+            ic50_replicates = ic50_replicates[np.abs(ic50_zscore) < z_score_threshold_ic50]
+
+            #remove nan values from all (nan values are due to both no experimental data, and z-score filtering)
+            ic50_replicates = ic50_replicates[~np.isnan(ic50s)]
+            ic50s = ic50s[~np.isnan(ic50s)]
+
+            if len(ic50s) < 3:
+                print('Not enough replicates for sample {}. Skipping.'.format(name))
+                continue
+            
+            #get average values:
+            sample_names = np.append(sample_names, name)
+            sample_ic50 = np.append(sample_ic50, np.mean(ic50s))
+            sample_ic50_error = np.append(sample_ic50_error,np.std(ic50s))
+            
+            #keep track of replicates:
+            sample_ic50_replicates.append(ic50_replicates)
+
+            if save_intermediate_data:
+                temp_list1 = []
+                temp_list1.append(name)
+                for ic50 in ic50s:
+                    temp_list1.append(ic50)
+                export_list1.append(temp_list1)
+
+        if save_intermediate_data:   
+            df2 = pd.DataFrame(export_list1)
+            df2.to_csv('ic50_file_intermediate.csv')      
+        for i, sample_name in enumerate(sample_names):
+            self._db_conn.add_sample_analysis(run_name, 'ic50_filtered', sample_name, {'ic50': sample_ic50[i], 'ic50_error': sample_ic50_error[i], 'ic50_replicates': sample_ic50_replicates[i]})
+          
+        print('Average number of replicates per sample post-filtering: {}'.format(int(np.round(np.mean([len(i) for i in sample_ic50_replicates]), 0))))
+
+
+    def plot_filtered_ic50(self, run_name: str, inhibition_model = None):
+        
+        if inhibition_model is None:
+            # default model
+            def inhibition_model(x, r_max, r_min, ic50):
+                return r_min + (r_max-r_min)/(1+(x/ic50))
+            
+        #first, fill it with NaNs as a placeholder:
+        ic50_to_plot = {chamber_idx: np.nan for chamber_idx in self._run_data[run_name]["chamber_idxs"]}
+
+        chamber_name_to_id_dict = self._db_conn.get_chamber_name_to_id_dict()
+
+        initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
+        initial_rate_arr = np.array(list(initial_rates_dict.values()))
+        chamber_idxs = list(initial_rates_dict.keys())
+      
+        filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
+        filtered_initial_slopes = deepcopy(initial_rate_arr)
+        for filter in filters: filtered_initial_slopes *= filter
+        sample_ic50_dict = self._db_conn.get_sample_analysis_dict(run_name, 'ic50_filtered')
+        #then, fill in the values we have:
+        for name, values in sample_ic50_dict.items():
+            for chamber_idx in chamber_name_to_id_dict[name]:
+
+                ic50_to_plot[chamber_idx] = values['ic50']
+        
+        chamber_names_dict = self._db_conn.get_chamber_name_dict()
+
+        #plotting function: We'll generate an MM subplot for each chamber.
+        def plot_chamber_ic50(chamber_id, ax):
+
+            #get the substrate concentrations that match with each initial rate:
+            substrate_concs = self._run_data[run_name]["conc_data"]
+
+            ### PLOT MEAN KI FIT###
+            #find the name of the chamber:
+            chamber_name = chamber_names_dict[chamber_id]
+            #first, find all chambers with this name:
+            #if there's no data, just skip!
+            if chamber_name not in sample_ic50_dict.keys():
+                return ax
+            chamber_id_list = sample_ic50_dict[chamber_name]['ic50_replicates']
+
+            #convert to array indices:
+            chamber_id_list = [list(chamber_idxs).index(x) for x in chamber_id_list]
+
+            #get the initial rates for each chamber:
+            initial_slopes = filtered_initial_slopes[chamber_id_list,:]
+        
+            normed_initial_slopes = initial_slopes / np.nanmax(initial_slopes, axis=1)[: , np.newaxis]
+
+            #get average
+            initial_slopes_avg = np.nanmean(normed_initial_slopes, axis=0)
+            #get error bars
+            initial_slopes_std = np.nanstd(normed_initial_slopes, axis=0)
+
+            x_data = substrate_concs
+            y_data = initial_slopes_avg
+
+            #plot with error bars:
+            ax.errorbar(x_data, y_data, yerr=initial_slopes_std,  fmt='o', label="Average")
+
+
+            ### PLOT INDIVIDUAL K_i VALUES ###
+            chamber_initial_slopes = filtered_initial_slopes[list(chamber_idxs).index(chamber_id), :]
+            chamber_normed_initial_slopes = chamber_initial_slopes/ np.nanmax(chamber_initial_slopes)
+            x_data = substrate_concs
+            y_data = chamber_normed_initial_slopes
+
+            fit_params = self._db_conn.get_analysis(run_name, 'ic50_raw', 'fit_params')[chamber_id]
+
+            #plot with error bars:
+            ax.scatter(x_data, y_data, color='green', s=100, label='Chamber')
+            x_logspace = np.logspace(np.log10(np.nanmin(x_data[1:])), np.log10(np.nanmax(x_data)), 100)
+        
+            ax.plot(x_logspace, inhibition_model(x_logspace, **fit_params), color='green', label='Chamber Fit')
+
+            ax.set_xscale('log')
+            ax.legend()
+            
+            return ax
+
+
+        ### PLOT THE CHIP: now, we plot
+        plot_chip(ic50_to_plot, chamber_names_dict, graphing_function=plot_chamber_ic50, title='Filtered IC50s')
+
+    def export_ic50_result_csv(self, path_to_save:str, run_name:str):
+
+        chamber_names_dict = self._db_conn.get_chamber_name_dict()
+        sample_ic50_dict = self._db_conn.get_sample_analysis_dict(run_name, 'ic50_filtered')
+
+        #Full CSV, showing data for each CHAMBER:
+        output_csv_name = 'inhibition'
+
+        with open(os.path.join(path_to_save, output_csv_name+'.csv'), 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=',')
+            #write header:
+            writer.writerow(['id', 
+                            'x,y',
+                            'substrate_name', 
+                            'assay_type', 
+                            'replicates', 
+                            'Ki', 
+                            'Ki_mean_filtered', 
+                            'Ki_stdev_filtered', 
+                            'enzyme',])
+            #write data for each chamber:
+            for i, chamber_idx in enumerate(self._run_data[run_name]["chamber_idxs"]):
+                sample_name = chamber_names_dict[chamber_idx]
+                #get index in sample_names:
+                if sample_name in sample_ic50_dict.keys():
+                    sample_dict = sample_ic50_dict[sample_name]
+                    row = [chamber_names_dict[chamber_idx], #id
+                            chamber_idx, #x,y
+                            sample_name, #substrate_name
+                            "ic50_filtered", #assay_type
+                            len(sample_dict["ic50_replicates"]), #replicates
+                            self._db_conn.get_analysis(run_name, 'ic50_raw','ic50')[chamber_idx], #ic50
+                            sample_dict["ic50"], #kcat_mean_filtered
+                            sample_dict["ic50_error"], #kcat_stdev_filtered
+                            self._run_data[run_name]["enzyme_concentration"][i], #enzyme
+                            ]
+                else:
+                    row = [chamber_names_dict[chamber_idx], #id
+                            chamber_idx, #x,y
+                            sample_name, #substrate_name
+                            "ic50_filtered", #assay_type
+                            'NaN', #replicates
+                            self._db_conn.get_analysis(run_name, 'ic50_raw', 'ic50')[chamber_idx], #ic50
+                            'NaN', #K_i_mean_filtered
+                            'NaN', #K_i_stdev_filtered
+                            self._run_data[run_name]["enzyme_concentration"][i], #enzyme
+                    ]
+                
+                writer.writerow(row)
+
+            #Summary CSV, showing data for each SAMPLE:
+        output_csv_name = 'inhibition_summary'
+
+        with open(os.path.join(path_to_save, output_csv_name)+'_short.csv', 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=',')
+            #write header:
+            writer.writerow(['id', 
+                            'substrate_name', 
+                            'assay_type', 
+                            'replicates', 
+                            'Ki_mean_filtered', 
+                            'Ki_stdev_filtered', 
+                            'enzyme'])
+            #write data:
+            for name, sample_dict in sample_ic50_dict.items():
+                row = [name,
+                    name,
+                    "ic50_filtered", 
+                    len(sample_dict["ic50_replicates"]), 
+                    sample_dict["ic50"], 
+                    sample_dict["ic50_error"], 
+                    "What should this be?",
+                    ]
+                writer.writerow(row)
+
+    ##############################
+    #### Freiatas W.I.P. Code ####
+    ##############################
 
     # def __init__(self, file:str, new:bool=False, units_registry=None):
     #     '''
