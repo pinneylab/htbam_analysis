@@ -23,7 +23,15 @@ class HTBAMExperiment:
         print(self._db_conn.get_run_names())
         self._run_data = {}
 
-
+    def get_concentration_units(self, run_name: str) -> str:
+        '''
+        Returns the units of concentration for the given run.
+        Input:
+            run_name (str): the name of the run to be analyzed.
+        Output:
+            str: the units of concentration for the given run.
+        '''
+        return self._db_conn.get_concentration_units(run_name)
 
     def fit_standard_curve(self, run_name: str):
         '''
@@ -135,7 +143,7 @@ class HTBAMExperiment:
             substrate_concs = self._run_data[run_name]["conc_data"]
         else:
             substrate_concs = np.array([substrate_conc for _ in range(conc_dim)])
-        
+        #print(substrate_concs)
         product_thresholds = substrate_concs * max_rxn_perc / 100
         product_thresholds = product_thresholds[:, np.newaxis]
 
@@ -180,7 +188,7 @@ class HTBAMExperiment:
         print(f'{two_point_fits} reactions had less than 2 points for fitting')
 
 
-    def plot_initial_rates_chip(self, run_name: str, time_to_plot=0.3):
+    def plot_initial_rates_chip(self, run_name: str, time_to_plot=0.3, subtract_zeroth_point=False):
 
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
 
@@ -213,6 +221,7 @@ class HTBAMExperiment:
             x_data = x_data[time_idxs_to_plot]
             y_data = y_data[:, time_idxs_to_plot]
             
+            # TODO: add option to subtract zeroth point(s) from all points
             #get slope from the analysis:
             current_chamber_slopes = intial_rate_arr[data_index,:]
             #calculate y-intercept by making sure it intersects first point:
@@ -222,14 +231,21 @@ class HTBAMExperiment:
             
             colors = sns.color_palette('husl', n_colors=y_data.shape[0])
 
-            #print(y_data.shape[0])
             for i in range(y_data.shape[0]): #over each concentration:
                 
-                ax.scatter(x_data, y_data[i,:], color=colors[i], alpha=0.3)
-                ax.scatter(x_data[current_chamber_reg_mask[i]], y_data[i, current_chamber_reg_mask[i]], color=colors[i], alpha=1, s=50)
-                
+                if subtract_zeroth_point:
+                    try:
+                        ax.scatter(x_data, y_data[i,:] - y_data[i,0], color=colors[i], alpha=0.3)
+                        ax.scatter(x_data[current_chamber_reg_mask[i]],
+                                   y_data[i, current_chamber_reg_mask[i]] - y_data[i, current_chamber_reg_mask[i]][0], color=colors[i], alpha=1, s=50)
+                    except:
+                        pass
+                else:
+                    ax.scatter(x_data, y_data[i,:], color=colors[i], alpha=0.3)
+                    ax.scatter(x_data[current_chamber_reg_mask[i]], y_data[i, current_chamber_reg_mask[i]], color=colors[i], alpha=1, s=50)
+
                 m = current_chamber_slopes[i]
-                b = current_chamber_intercepts[i]
+                b = current_chamber_intercepts[i] if not subtract_zeroth_point else 0
                 if not (np.isnan(m) or np.isnan(b)):
                     #return False, no_update, no_update
                     ax.plot(x_data, m*np.array(x_data) + b, color=colors[i])
@@ -434,7 +450,8 @@ class HTBAMExperiment:
 
         ### PLOT THE CHIP: now, we plot
         plot_chip(filtered_initial_rates_to_plot, chamber_names_dict, graphing_function=plot_chamber_filtered_initial_rates, title='Kinetics: Filtered Initial Rates (Max)')
-        print('{}/1792 wells pass our filters.'.format( np.sum([x for x in filtered_initial_rates_to_plot.values()]) ) )
+        print('{}/1792 wells pass our filters.'.format( 
+            np.sum([np.any(~np.isnan(filtered_initial_slopes[i,:])) for i in range(len(self._run_data[run_name]["chamber_idxs"]))]) ) )
 
 
     def fit_ic50s(self, run_name: str, inhibition_model = None):
@@ -464,7 +481,7 @@ class HTBAMExperiment:
         for i in range(len(chamber_idxs)):
             current_slopes = filtered_initial_slopes[i, :]
 
-            if np.all(np.isnan(current_slopes)):
+            if np.all(np.isnan(current_slopes)) or np.all(current_slopes == 0) or np.nanmax(current_slopes) == 0:
                 #print('Chamber {} has no slopes!'.format(chamber_idxs[i]))
                 ic50_array = np.append(ic50_array, np.nan)
                 ic50_error_array = np.append(ic50_error_array, np.nan)
@@ -491,7 +508,6 @@ class HTBAMExperiment:
             max_normed_slopes = current_slopes / np.nanmax(current_slopes)
             #kinetics.fit_and_plot_micheaelis_menten(current_slopes, current_slopes, current_concs, enzyme_concentration_converted_units[i], 'uM', 'MM for first chamber!')
             #K_i, std_err = kinetics.fit_inhibition_constant(max_normed_slopes, max_normed_slopes, current_concs, enzyme_concentration_converted_units[i], 'uM', 'MM for first chamber!')
-
             p_opt, p_cov = curve_fit(inhibition_model, current_concs, max_normed_slopes)
             param_dict = {i:j for i,j in zip(arg_list[1:], p_opt)}
 
@@ -609,6 +625,183 @@ class HTBAMExperiment:
         print('Average number of replicates per sample post-filtering: {}'.format(int(np.round(np.mean([len(i) for i in sample_ic50_replicates]), 0))))
 
 
+    def fit_mm(self, run_name: str, enzyme_conc_conversion: float = 1.0, mm_model = None):
+
+        if mm_model is None:
+            # default model
+            def mm_model(x, v_max, K_m):
+                return v_max*x/(K_m + x)
+        
+        arg_list = str(inspect.signature(mm_model)).strip("()").replace(" ", "").split(",")
+
+        # get data
+        initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
+        initial_rate_arr = np.array(list(initial_rates_dict.values()))
+        chamber_idxs = list(initial_rates_dict.keys())
+      
+        filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
+        filtered_initial_slopes = deepcopy(initial_rate_arr)
+        for filter in filters: filtered_initial_slopes *= filter
+
+        enzyme_concentrations = deepcopy(self._run_data[run_name]["enzyme_concentration"])
+
+        #Here, we calculate the IC50 for each chamber.
+        kcat_array = np.array([])
+        Km_array = np.array([])
+        fit_params = []
+        fit_params_errs = []
+        _count = 0
+        for i in range(len(chamber_idxs)):
+            current_slopes = filtered_initial_slopes[i, :]
+
+            if np.all(np.isnan(current_slopes)) or np.all(current_slopes == 0):
+                #print('Chamber {} has no slopes!'.format(chamber_idxs[i]))
+                kcat_array = np.append(kcat_array, np.nan)
+                Km_array = np.append(Km_array, np.nan)
+                fit_params.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                fit_params_errs.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                _count += 1
+                continue
+
+            #get indices of non-nan values:
+            non_nan_idxs = np.where(~np.isnan(current_slopes))[0]
+            
+            current_slopes = current_slopes[non_nan_idxs]
+            current_concs = self._run_data[run_name]["conc_data"][non_nan_idxs]
+
+            # NOTE: this should be optimized
+            if len(current_slopes) < 5:
+                #print('Chamber {} has fewer than 3 slopes!'.format(chamber_idxs[i]))
+                kcat_array = np.append(kcat_array, np.nan)
+                Km_array = np.append(Km_array, np.nan)
+                fit_params.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                fit_params_errs.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                _count += 1
+                continue
+
+            #kinetics.fit_and_plot_micheaelis_menten(current_slopes, current_slopes, current_concs, enzyme_concentration_converted_units[i], 'uM', 'MM for first chamber!')
+            #K_i, std_err = kinetics.fit_inhibition_constant(max_normed_slopes, max_normed_slopes, current_concs, enzyme_concentration_converted_units[i], 'uM', 'MM for first chamber!')
+            p_opt, p_cov = curve_fit(mm_model, current_concs, current_slopes)
+            param_dict = {i:j for i,j in zip(arg_list[1:], p_opt)}
+
+            if ("v_max" not in param_dict.keys()) or ("K_m" not in param_dict.keys()):
+                raise ValueError("MM model must have 'v_max' and 'K_m' parameters.")
+            
+            v_max = param_dict["v_max"]
+            fit_err = np.sqrt(np.diag(p_cov))
+            param_error_dict = {i:j for i,j in zip(arg_list[1:], fit_err)}
+
+          
+            kcat_array = np.append(kcat_array, v_max/ (enzyme_concentrations[i] * enzyme_conc_conversion))
+            
+            Km_array = np.append(Km_array, param_dict["K_m"])
+            fit_params.append(param_dict)
+            fit_params_errs.append(param_error_dict)
+        # chamber_idxs, luminance_data, conc_data, time_data
+
+        for i, chamber_idx in enumerate(chamber_idxs):
+            self._db_conn.add_analysis(run_name, 'mm_raw', chamber_idx,  {'kcat': kcat_array[i], 
+                                                                            'K_m': Km_array[i],
+                                                                            'fit_params': fit_params[i],
+                                                                            'fit_params_errs': fit_params_errs[i]} )
+        print(f'{_count} chambers had fewer than 5 slopes and were not fit.')
+
+    def filter_mm(self, 
+                    run_name,
+                    z_score_threshold_mm = 1.5,
+                    z_score_threshold_expression = 1.5,
+                    save_intermediate_data = False):
+
+        kcat_array = np.array(list(self._db_conn.get_analysis(run_name, 'mm_raw', 'kcat').values()))
+        Km_array = np.array(list(self._db_conn.get_analysis(run_name, 'mm_raw', 'K_m').values()))
+        enzyme_concentration = self._run_data[run_name]["enzyme_concentration"]
+       
+        #Get chamber ids from metadata:
+        chamber_names_dict = self._db_conn.get_chamber_name_to_id_dict()
+
+        #Get average k_cat, k_M, and v_max for each sample:
+        sample_names = np.array([])
+        sample_kcat = np.array([])
+        sample_kcat_std = np.array([])
+        sample_K_m = np.array([])
+        sample_K_m_std = np.array([])
+        sample_mm_replicates = []
+
+        export_list1=[]
+        #For each sample, 
+        for name, ids in chamber_names_dict.items():
+            
+
+            ### GATHER MM PARAMETERS OF REPLICATES FOR EACH SAMPLE: ###
+            #get indices of idxs in chamber_idxs:
+            idxs = [list(self._run_data[run_name]["chamber_idxs"]).index(x) for x in ids]
+
+            #get values for those indices:
+            kcats = kcat_array[idxs]
+            K_ms = Km_array[idxs]
+
+            #keep track of which wells we exclude later:
+            mm_replicates = np.array(ids)
+
+            #if any of these is all nans, just continue to avoid errors:
+            if np.all(np.isnan(kcats)) or np.all(np.isnan(K_ms)):
+                print('No values from sample {}, all pre-filtered.'.format(name))
+                continue
+
+            ### FILTER OUT OUTLIERS: ###
+            #calculate z-score for each value:
+            kcat_zscore = (kcats - np.nanmean(kcats))/np.nanstd(kcats)
+            K_m_zscore = (K_ms - np.nanmean(K_ms))/np.nanstd(K_ms)
+
+            #also, get z-score of enzyme expression for each well:
+            enzyme_concentration_zscore = (enzyme_concentration[idxs] - np.nanmean(enzyme_concentration[idxs]))/np.nanstd(enzyme_concentration[idxs]) #in units of 'substrate_conc_unit' 
+
+            z_score_mask = np.logical_and(np.abs(enzyme_concentration_zscore) < z_score_threshold_expression, np.abs(kcat_zscore) < z_score_threshold_mm, np.abs(K_m_zscore) < z_score_threshold_mm)
+            
+            #First, for enzyme expression outliers, set the value to NaN to be filtered in the final step:
+            kcats[~z_score_mask] = np.nan
+            K_ms[~z_score_mask] = np.nan
+            mm_replicates[~z_score_mask] = np.nan
+
+            #remove nan values from all (nan values are due to both no experimental data, and z-score filtering)
+            nan_mask = np.logical_and(~np.isnan(kcats), ~np.isnan(K_ms))
+            kcats = kcats[nan_mask]
+            K_ms = K_ms[nan_mask]
+            mm_replicates = mm_replicates[nan_mask]
+          
+
+
+            if len(kcats) < 3:
+                print('Not enough replicates for sample {}. Skipping.'.format(name))
+                continue
+            
+            #get average values:
+            sample_names = np.append(sample_names, name)
+            sample_kcat = np.append(sample_kcat, np.mean(kcats))
+            sample_kcat_std = np.append(sample_kcat_std, np.std(kcats))
+            sample_K_m = np.append(sample_K_m, np.mean(K_ms))
+            sample_K_m_std = np.append(sample_K_m_std, np.std(K_ms))
+            
+            #keep track of replicates:
+            sample_mm_replicates.append(mm_replicates)
+
+            if save_intermediate_data:
+                temp_list1 = []
+                temp_list1.append(name)
+                for kcat in kcats:
+                    temp_list1.append(kcat)
+                export_list1.append(temp_list1)
+
+        if save_intermediate_data:   
+            df2 = pd.DataFrame(export_list1)
+            df2.to_csv('mm_file_intermediate.csv')      
+        for i, sample_name in enumerate(sample_names):
+            self._db_conn.add_sample_analysis(run_name, 'mm_filtered', sample_name, {'kcat': sample_kcat[i], 'kcat_std': sample_kcat_std[i],
+                                                                                     'K_m': sample_K_m[i] , 'K_m_std': sample_K_m_std[i],
+                                                                                     'mm_replicates': sample_mm_replicates[i]})
+          
+        print('Average number of replicates per sample post-filtering: {}'.format(int(np.round(np.mean([len(i) for i in sample_mm_replicates]), 0))))
+
     def plot_filtered_ic50(self, run_name: str, inhibition_model = None):
         
         if inhibition_model is None:
@@ -695,6 +888,120 @@ class HTBAMExperiment:
         ### PLOT THE CHIP: now, we plot
         plot_chip(ic50_to_plot, chamber_names_dict, graphing_function=plot_chamber_ic50, title='Filtered IC50s')
 
+    def plot_filtered_mm(self, run_name: str,
+                         enzyme_conc_conversion: float = 1.0, 
+                         show_average_fit: bool = False,
+                         mm_model = None):
+        
+        if mm_model is None:
+            # default model
+            def mm_model(x, v_max, K_m):
+                return v_max*x/(K_m + x)
+        elif show_average_fit:
+            raise ValueError("Cannot show average fit with custom model.")
+            
+        #first, fill it with NaNs as a placeholder:
+        mm_to_plot = {chamber_idx: np.nan for chamber_idx in self._run_data[run_name]["chamber_idxs"]}
+
+        chamber_name_to_id_dict = self._db_conn.get_chamber_name_to_id_dict()
+
+        enzyme_concentrations = deepcopy(self._run_data[run_name]["enzyme_concentration"])
+
+        initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
+        initial_rate_arr = np.array(list(initial_rates_dict.values()))
+        chamber_idxs = list(initial_rates_dict.keys())
+      
+        filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
+        filtered_initial_slopes = deepcopy(initial_rate_arr)
+        for filter in filters: filtered_initial_slopes *= filter
+
+        sample_mm_dict = self._db_conn.get_sample_analysis_dict(run_name, 'mm_filtered')
+
+        #then, fill in the values we have:
+        for name, values in sample_mm_dict.items():
+            for chamber_idx in chamber_name_to_id_dict[name]:
+                cham_kcat = deepcopy(self._db_conn.get_analysis(run_name, 'mm_raw', 'kcat')[chamber_idx])
+
+                mm_to_plot[chamber_idx] = cham_kcat
+        
+        chamber_names_dict = self._db_conn.get_chamber_name_dict()
+
+        #plotting function: We'll generate an MM subplot for each chamber.
+        def plot_chamber_mm(chamber_id, ax):
+
+            #get the substrate concentrations that match with each initial rate:
+            substrate_concs = self._run_data[run_name]["conc_data"]
+
+            ## TODO: upper / lower bound for mean MM plotting
+            ### PLOT MEAN KI FIT###
+            #find the name of the chamber:
+            chamber_name = chamber_names_dict[chamber_id]
+
+            
+            #first, find all chambers with this name:
+            #if there's no data, just skip!
+            if chamber_name not in sample_mm_dict.keys():
+                return ax
+            chamber_id_list = sample_mm_dict[chamber_name]['mm_replicates']
+            #convert to array indices:
+            chamber_id_list = [list(chamber_idxs).index(x) for x in chamber_id_list]
+
+            #get the initial rates for each chamber:
+            initial_slopes = deepcopy(filtered_initial_slopes[chamber_id_list,:])
+        
+            normed_initial_slopes = initial_slopes / (enzyme_concentrations[chamber_id_list][: , np.newaxis] * enzyme_conc_conversion)
+
+           
+            #get average
+            initial_slopes_avg = np.nanmean(normed_initial_slopes, axis=0)
+            #get error bars
+            initial_slopes_std = np.nanstd(normed_initial_slopes, axis=0)
+
+            x_data = substrate_concs
+            y_data = initial_slopes_avg
+
+            #plot with error bars:
+            ax.errorbar(x_data, y_data, yerr=initial_slopes_std,  ls="None", capsize=3, color='orange')
+            ax.scatter(x_data, y_data, color='orange', s=100)
+          
+            if show_average_fit:
+                x_linspace = np.linspace(np.nanmin(x_data), np.nanmax(x_data), 100)
+                ax.plot(x_linspace, mm_model(x_linspace, sample_mm_dict[chamber_name]['kcat'], sample_mm_dict[chamber_name]["K_m"]), color='orange', label='Average Fit')
+                ax.fill_between(x_linspace, mm_model(x_linspace, sample_mm_dict[chamber_name]['kcat'] - sample_mm_dict[chamber_name]['kcat_std'], sample_mm_dict[chamber_name]['K_m']),
+                                            mm_model(x_linspace, sample_mm_dict[chamber_name]['kcat'] + sample_mm_dict[chamber_name]['kcat_std'], sample_mm_dict[chamber_name]['K_m']),
+                                            color='orange', alpha=0.3)
+
+            ### PLOT INDIVIDUAL K_i VALUES ###
+            chamber_initial_slopes = deepcopy(filtered_initial_slopes[list(chamber_idxs).index(chamber_id), :])
+           
+            chamber_normed_initial_slopes = chamber_initial_slopes/ (enzyme_concentrations[list(chamber_idxs).index(chamber_id)] * enzyme_conc_conversion)
+            
+            x_data = substrate_concs
+            y_data = chamber_normed_initial_slopes
+
+            fit_params = deepcopy(self._db_conn.get_analysis(run_name, 'mm_raw', 'fit_params')[chamber_id])
+                    
+            fit_params['v_max'] = fit_params['v_max']/(enzyme_concentrations[list(chamber_idxs).index(chamber_id)]* enzyme_conc_conversion)
+            #plot with error bars:
+            ax.scatter(x_data, y_data, color='blue', label='Chamber', zorder=3)
+            x_linspace = np.linspace(np.nanmin(x_data), np.nanmax(x_data), 100)
+            
+            ax.plot(x_linspace, mm_model(x_linspace, **fit_params), color='blue', label='Chamber Fit', zorder=3)
+
+            ax.legend(loc='upper left')
+            ax.text(0.7, 0.25, '$k_{cat}$' + ': {:.2f} '.format(fit_params['v_max']) +'$s^{-1}$', transform=ax.transAxes, fontsize=15,)
+            ax.text(0.7, 0.18, '$K_M$: {:.2f} uM'.format(fit_params['K_m']), transform=ax.transAxes, fontsize=15)
+            ax.text(0.55,0.10, ' $\overline{k_{cat}}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["kcat"]) 
+                    + '$\pm$ {:.2f}'.format(sample_mm_dict[chamber_name]["kcat_std"]) + ' $s^{-1}$', transform=ax.transAxes, fontsize=15,) 
+            ax.text(0.55,0.03, ' $\overline{K_M}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["K_m"]) 
+                    + '$\pm$ {:.2f}'.format(sample_mm_dict[chamber_name]["K_m_std"]) + ' uM', transform=ax.transAxes, fontsize=15)           
+            return ax
+
+
+        ### PLOT THE CHIP: now, we plot
+        plot_chip(mm_to_plot, chamber_names_dict, graphing_function=plot_chamber_mm, title='Filtered MM')
+
+
     def export_ic50_result_csv(self, path_to_save:str, run_name:str):
 
         chamber_names_dict = self._db_conn.get_chamber_name_dict()
@@ -769,7 +1076,93 @@ class HTBAMExperiment:
                     "What should this be?",
                     ]
                 writer.writerow(row)
+    def export_mm_result_csv(self, path_to_save:str, run_name:str):
 
+        chamber_names_dict = self._db_conn.get_chamber_name_dict()
+        sample_mm_dict = self._db_conn.get_sample_analysis_dict(run_name, 'mm_filtered')
+
+        #Full CSV, showing data for each CHAMBER:
+        output_csv_name = 'mm'
+
+        with open(os.path.join(path_to_save, output_csv_name+'.csv'), 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=',')
+            #write header:
+            writer.writerow(['id', 
+                            'x,y',
+                            'sample_name', 
+                            'assay_type', 
+                            'replicates', 
+                            'kcat', 
+                            'Km',
+                            'kcat_mean_filtered', 
+                            'kcat_stdev_filtered',
+                            'Km_mean_filtered',
+                            'Km_stdev_filtered', 
+                            'enzyme',])
+            #write data for each chamber:
+            for i, chamber_idx in enumerate(self._run_data[run_name]["chamber_idxs"]):
+                sample_name = chamber_names_dict[chamber_idx]
+                #get index in sample_names:
+                if sample_name in sample_mm_dict.keys():
+                    sample_dict = sample_mm_dict[sample_name]
+                    row = [chamber_names_dict[chamber_idx], #id
+                            chamber_idx, #x,y
+                            sample_name, #substrate_name
+                            "mm_filtered", #assay_type
+                            len(sample_dict["mm_replicates"]), #replicates
+                            self._db_conn.get_analysis(run_name, 'mm_raw','kcat')[chamber_idx], #kcat
+                            self._db_conn.get_analysis(run_name, 'mm_raw','K_m')[chamber_idx], #Km
+                            sample_dict["kcat"], #kcat_mean_filtered
+                            sample_dict["kcat_std"], #kcat_stdev_filtered
+                            sample_dict["K_m"], #Km_mean_filtered
+                            sample_dict["K_m_std"], #Km_stdev_filtered
+                            self._run_data[run_name]["enzyme_concentration"][i], #enzyme
+                            ]
+                else:
+                    row = [chamber_names_dict[chamber_idx], #id
+                            chamber_idx, #x,y
+                            sample_name, #substrate_name
+                            "mm_filtered", #assay_type
+                            'NaN', #replicates
+                            self._db_conn.get_analysis(run_name, 'mm_raw', 'kcat')[chamber_idx], #ic50
+                            self._db_conn.get_analysis(run_name, 'mm_raw', 'K_m')[chamber_idx], #ic50
+                            'NaN', #kcat_mean_filtered
+                            'NaN', #kcat_stdev_filtered
+                            'NaN', #Km_mean_filtered
+                            'NaN', #Km_stdev_filtered
+                            self._run_data[run_name]["enzyme_concentration"][i], #enzyme
+                    ]
+                
+                writer.writerow(row)
+
+            #Summary CSV, showing data for each SAMPLE:
+        output_csv_name = 'mm_summary'
+
+        with open(os.path.join(path_to_save, output_csv_name)+'_short.csv', 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile, delimiter=',')
+            #write header:
+            writer.writerow(['id', 
+                            'sample_name', 
+                            'assay_type', 
+                            'replicates', 
+                            'kcat_mean_filtered',
+                            'kcat_stdev_filtered',
+                            'Km_mean_filtered',
+                            'Km_stdev_filtered',
+                            'enzyme'])
+            #write data:
+            for name, sample_dict in sample_mm_dict.items():
+                row = [name,
+                    name,
+                    "mm_filtered", 
+                    len(sample_dict["mm_replicates"]), 
+                    sample_dict["kcat"], 
+                    sample_dict["kcat_std"],
+                    sample_dict["K_m"],
+                    sample_dict["K_m_std"], 
+                    "What should this be?",
+                    ]
+                writer.writerow(row)
     ##############################
     #### Freiatas W.I.P. Code ####
     ##############################
