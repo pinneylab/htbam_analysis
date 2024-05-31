@@ -24,6 +24,7 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
 
     # nan values 5 std away from mean
     for chamber_id, value in plotting_var.items():
+        print(value)
         if value > plotting_var_mean + 5*plotting_var_std:
             plotting_var[chamber_id] = np.nan
         elif value < plotting_var_mean - 5*plotting_var_std:
