@@ -97,18 +97,30 @@ class ChipSeries:
                 for i in list(r.glob(glob_pattern))
                 if not "ChamberBorders" in i.stem or "Summary" in i.stem
             ]
+            
             if len(img_files) < 1:
                 raise ProcessingException(f"No images found! Looked in directory \"{root}\" for images that matched the pattern: \"{glob_pattern}\"")
             img_files = [img for img in img_files if img.parts[-1][0] != "."]
             img_paths = [Path(os.path.join(r.parent, img)) for img in img_files]
             pattern= re.compile("^([a-z|A-Z]*_){1,2}([0-9]*_){1,3}[0-9]*$")
+            
+            correct_setting_imgs = []
+
             for img in img_paths:
                 if pattern.match(img.stem):
-                    pass
+                    params = re.sub("^([A-Z|a-z]*_){1,2}", "", img.stem)
+                    img_exposure = params.split("_")[0]
+                    img_channel = params.split("_")[1]
+            
+                    if img_exposure == str(exposure) and img_channel == str(channel):
+                        correct_setting_imgs.append(img)
+                    else:
+                        pass
                 else:
                     raise ProcessingException(f"Malformed image name found \"{img.stem}\". Make sure any decimals in concentration are replaced with underscores.")
+         
             
-            record = {float(".".join(re.sub("^([A-Z|a-z]*_){1,2}", "", path.stem).split("_")[2:])): path for path in img_paths}
+            record = {float(".".join(re.sub("^([A-Z|a-z]*_){1,2}", "", path.stem).split("_")[2:])): path for path in correct_setting_imgs}
             chipParams = (self.device.corners, self.device.pinlist, channel, exposure)
             self.chips = {
                 identifier: ChipImage(
@@ -753,7 +765,7 @@ class AssaySeries:
             "AssaySeries Button Reference Set | {}".format(button_ref.__str__())
         )
 
-    def load_kin(self, descriptions, paths, channel, exposure):
+    def load_kin(self, descriptions, paths, channel, exposure, custom_glob=None):
         """
         Loads kinetic imaging and descriptions into the AssaySeries.
 
@@ -784,7 +796,7 @@ class AssaySeries:
         )
         for desc, p, chan, exp in kin_refs:
             t = Timecourse(self.device, desc)
-            t.load_files(p, chan, exp)
+            t.load_files(p, chan, exp, custom_glob=custom_glob)
             self.assays[desc].series = t
 
     def load_quants(self, descriptions, paths, channel, exposure):
@@ -820,7 +832,7 @@ class AssaySeries:
             self.assays[desc].add_quant(q)
 
     def parse_kineticsFolders(
-        self, root, file_handles, descriptors, channel, exposure, pattern=None
+        self, root, file_handles, descriptors, channel, exposure, pattern=None, custom_glob=None
     ):
         """
         Walks down directory tree, matches the passed file handles to the Timecourse descriptors,
@@ -851,7 +863,7 @@ class AssaySeries:
             (handle, desc): p(handle) for handle, desc in zip(file_handles, descriptors)
         }
         
-        self.load_kin(descriptors, files.values(), channel, exposure)
+        self.load_kin(descriptors, files.values(), channel, exposure, custom_glob=custom_glob)
 
     def parse_quantificationFolders(
         self, root, file_handles, descriptors, channel, exposure, pattern=None
@@ -958,7 +970,7 @@ class AssaySeries:
             if low_mem:
                 s._delete_stamps()
 
-    def save_summary(self, outPath=None):
+    def save_summary(self, description=None, outPath=None):
         """
         Saves a CSV summary of the AssaySeries to the specified path.
 
@@ -973,7 +985,10 @@ class AssaySeries:
         if not outPath:
             outPath = self.chamber_root
         df = self.summarize()
-        fn = "{}_{}.csv.bz2".format(self.device.dname, "TitrationSeries_Analysis")
+        if not description:
+            fn = "{}_{}.csv.bz2".format(self.device.dname, "TitrationSeries_Analysis")
+        else:   
+            fn = "{}_{}_{}.csv.bz2".format(self.device.dname, description, "TitrationSeries_Analysis")
         df.to_csv(os.path.join(outPath, fn), compression="bz2")
 
     def __str__(self):
