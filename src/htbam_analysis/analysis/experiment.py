@@ -35,7 +35,7 @@ class HTBAMExperiment:
         '''
         return self._db_conn.get_concentration_units(run_name)
 
-    def fit_standard_curve(self, run_name: str):
+    def fit_standard_curve(self, run_name: str, low_conc_idx: int = 0, high_conc_idx: int = None):
         '''
         Fits a standard curve to the data in the given run.
         Input:
@@ -52,9 +52,13 @@ class HTBAMExperiment:
         luminance_shape = self._run_data[run_name]['luminance_data'].shape
         print(f"\t-- {luminance_shape[0]} time points.\n\t-- {luminance_shape[1]} chambers.\n\t-- {luminance_shape[2]} concentrations.")
         
+        if high_conc_idx is None:
+            high_conc_idx = len(self._run_data[run_name]["conc_data"])
+
         print("\nFitting standard curve...")
         for i, idx in tqdm(list(enumerate(self._run_data[run_name]["chamber_idxs"]))):
-            slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(self._run_data[run_name]["conc_data"], self._run_data[run_name]["luminance_data"][:,i])
+            slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(self._run_data[run_name]["conc_data"][low_conc_idx:high_conc_idx], 
+                                                                                 self._run_data[run_name]["luminance_data"][:,i][:,low_conc_idx:high_conc_idx])
             results_dict = {'slope': slope, 'intercept': intercept, 'r_value': r_value, 'r2':r_value**2, 'p_value': p_value, 'std_err': std_err}
             self._db_conn.add_analysis(run_name, 'linear_regression', idx,results_dict)
 
@@ -69,7 +73,7 @@ class HTBAMExperiment:
         # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
         def plot_chamber_slopes(chamber_id, ax):
             #parameters:
-            run_name = 'standard_0'
+    
             analysis_name = 'linear_regression'
             
             #convert from 'x,y' to integer index in the array:
@@ -89,7 +93,6 @@ class HTBAMExperiment:
                 #return False, no_update, no_update
                 ax.plot(x_data, m*np.array(x_data) + b)
             return ax
-        print(slopes_to_plot)
         plot_chip(slopes_to_plot, chamber_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
 
     def fit_initial_rates(self, run_name: str, 
@@ -293,18 +296,19 @@ class HTBAMExperiment:
                     try:
                         ax.scatter(x_data, y_data[i,:] - y_data[i,0], color=colors[i], alpha=0.3)
                         ax.scatter(x_data[current_chamber_reg_mask[i]],
-                                   y_data[i, current_chamber_reg_mask[i]] - y_data[i, current_chamber_reg_mask[i]][0], color=colors[i], alpha=1, s=50)
+                                   y_data[i, current_chamber_reg_mask[i]] - y_data[i, current_chamber_reg_mask[i]][0], color=colors[i], alpha=1, s=50, label=f'{self._run_data[run_name]["conc_data"][i]}')
                     except:
                         pass
                 else:
                     ax.scatter(x_data, y_data[i,:], color=colors[i], alpha=0.3)
-                    ax.scatter(x_data[current_chamber_reg_mask[i]], y_data[i, current_chamber_reg_mask[i]], color=colors[i], alpha=1, s=50)
+                    ax.scatter(x_data[current_chamber_reg_mask[i]], y_data[i, current_chamber_reg_mask[i]], color=colors[i], alpha=1, s=50, label=f'{self._run_data[run_name]["conc_data"][i]}')
 
                 m = current_chamber_slopes[i]
                 b = current_chamber_intercepts[i] if not subtract_zeroth_point else 0
                 if not (np.isnan(m) or np.isnan(b)):
                     #return False, no_update, no_update
                     ax.plot(x_data, m*np.array(x_data) + b, color=colors[i])
+            ax.legend()
             return ax
 
         ### PLOT THE CHIP: now, we plot
@@ -385,7 +389,9 @@ class HTBAMExperiment:
                     filter_initial_rate_R2[i,j] = np.nan
             if conc_count - _chamber_count < 7:
                 _count +=1
-        print('Initial Rate R^2 filter: {}/{} chambers pass with 10 or more slopes.'.format(chamber_count-_count, chamber_count))
+        # TODO This shouldnt be base on sume hard coded cutoff, we should figure out a more flexible way of setting the min number of chambers
+        # but for now, we'll just use 7 as a cutoff
+        print('Initial Rate R^2 filter: {}/{} chambers pass with 10 or more slopes. NOTE: this doesnt mean chambers with <10 are excluded. Will make more clear in the future.'.format(chamber_count-_count, chamber_count))
         filters.append(filter_initial_rate_R2)
         filter_names.append('filter_initial_rate_R2')
         filter_values.append(initial_rate_R2_threshold)
@@ -403,7 +409,7 @@ class HTBAMExperiment:
                         filter_positive_initial_slope[i,j] = np.nan
                 if conc_count - _chamber_count < 7:
                     _count +=1
-            print('Positive Initial Slope filter: {}/{} chambers pass with 10 or more slopes.'.format(chamber_count-_count, chamber_count))
+            print('Positive Initial Slope filter: {}/{} chambers pass with 10 or more slopes. NOTE: this doesnt mean chambers with <10 are excluded. Will make more clear in the future.'.format(chamber_count-_count, chamber_count))
             filters.append(filter_positive_initial_slope)
         filter_names.append('filter_positive_initial_slope')
         filter_values.append(positive_initial_slope_filter)
@@ -511,7 +517,25 @@ class HTBAMExperiment:
         print('{}/1792 wells pass our filters.'.format( 
             np.sum([np.any(~np.isnan(filtered_initial_slopes[i,:])) for i in range(len(self._run_data[run_name]["chamber_idxs"]))]) ) )
 
+    def combine_filtered_assays(self, run_names_to_combine: List[str]):
+        new_run_name = self._db_conn.combine_runs(run_names_to_combine)
+        if new_run_name not in self._run_data.keys():
+            self._run_data[new_run_name] = {"conc_data": None}
+        for run_name in run_names_to_combine:
+            if self._run_data[new_run_name]["conc_data"] is None:
+               self._run_data[new_run_name]["conc_data"] = self._run_data[run_name]["conc_data"]
+            else:
+                self._run_data[new_run_name]["conc_data"] = np.concatenate((self._run_data[new_run_name]["conc_data"], self._run_data[run_name]["conc_data"]))
 
+        self._run_data[new_run_name]["enzyme_concentration"] = self._run_data[run_names_to_combine[0]]["enzyme_concentration"]
+        self._run_data[new_run_name]["chamber_idxs"] = self._run_data[run_names_to_combine[0]]["chamber_idxs"] 
+        print(f"New run \"{new_run_name}\" created by combining runs {run_names_to_combine}.")
+
+    def remove_run(self, run_name: str):
+        if run_name in self._run_data.keys():
+            del self._run_data[run_name]
+        self._db_conn.remove_run(run_name)
+        
     def fit_ic50s(self, run_name: str, inhibition_model = None):
 
         if inhibition_model is None:
@@ -889,7 +913,7 @@ class HTBAMExperiment:
           
         print('Average number of replicates per sample post-filtering: {}'.format(int(np.round(np.mean([len(i) for i in sample_mm_replicates]), 0))))
 
-    def plot_filtered_ic50(self, run_name: str, inhibition_model = None):
+    def plot_filtered_ic50(self, run_name: str, inhibition_model = None, show_average_fit: bool = False):
         
         if inhibition_model is None:
             # default model
@@ -936,7 +960,7 @@ class HTBAMExperiment:
             chamber_id_list = [list(chamber_idxs).index(x) for x in chamber_id_list]
 
             #get the initial rates for each chamber:
-            initial_slopes = filtered_initial_slopes[chamber_id_list,:]
+            initial_slopes = deepcopy(filtered_initial_slopes[chamber_id_list,:])
         
             normed_initial_slopes = initial_slopes / np.nanmax(initial_slopes, axis=1)[: , np.newaxis]
 
@@ -947,11 +971,22 @@ class HTBAMExperiment:
 
             x_data = substrate_concs
             y_data = initial_slopes_avg
-
+           
             #plot with error bars:
-            ax.errorbar(x_data, y_data, yerr=initial_slopes_std,  fmt='o', label="Average")
+            ax.errorbar(x_data, y_data, yerr=initial_slopes_std,  ls="None", capsize=3, color='orange')
+            ax.scatter(x_data, y_data, color='orange', s=100)
 
-
+            if show_average_fit:
+                all_fit_params = self._db_conn.get_analysis(run_name, 'ic50_raw', 'fit_params')
+                r_max_mins = [(all_fit_params[idx]["r_max"], all_fit_params[idx]["r_min"]) for idx in sample_ic50_dict[chamber_name]['ic50_replicates']]
+                r_max_avg = np.mean([x[0] for x in r_max_mins][0])
+                r_min_avg = np.mean([x[1] for x in r_max_mins][0])
+                x_logspace = np.logspace(np.log10(np.nanmin(x_data[1:])), np.log10(np.nanmax(x_data)), 100)
+                ax.plot(x_logspace, inhibition_model(x_logspace, r_max=r_max_avg, r_min=r_min_avg, ic50=sample_ic50_dict[chamber_name]['ic50'],), color='orange', label='Average Fit')
+                ax.fill_between(x_logspace, inhibition_model(x_logspace, r_max=r_max_avg, r_min=r_min_avg, ic50=sample_ic50_dict[chamber_name]['ic50'] - sample_ic50_dict[chamber_name]['ic50_error'],),
+                                            inhibition_model(x_logspace,  r_max=r_max_avg, r_min=r_min_avg, ic50=sample_ic50_dict[chamber_name]['ic50'] + sample_ic50_dict[chamber_name]['ic50_error'],),
+                                            color='orange', alpha=0.3)
+            
             ### PLOT INDIVIDUAL K_i VALUES ###
             chamber_initial_slopes = filtered_initial_slopes[list(chamber_idxs).index(chamber_id), :]
             chamber_normed_initial_slopes = chamber_initial_slopes/ np.nanmax(chamber_initial_slopes)
@@ -961,12 +996,16 @@ class HTBAMExperiment:
             fit_params = self._db_conn.get_analysis(run_name, 'ic50_raw', 'fit_params')[chamber_id]
 
             #plot with error bars:
-            ax.scatter(x_data, y_data, color='green', s=100, label='Chamber')
+            ax.scatter(x_data, y_data, color='blue',zorder=3, label='Chamber')
             x_logspace = np.logspace(np.log10(np.nanmin(x_data[1:])), np.log10(np.nanmax(x_data)), 100)
         
-            ax.plot(x_logspace, inhibition_model(x_logspace, **fit_params), color='green', label='Chamber Fit')
+            ax.plot(x_logspace, inhibition_model(x_logspace, **fit_params), color='blue',zorder=3, label='Chamber Fit')
 
             ax.set_xscale('log')
+            ax.text(0.03, 0.15, '$IC_{50}$' + ': {:.3f} '.format(fit_params['ic50']) +'blah', transform=ax.transAxes, fontsize=12,)
+            ax.text(0.02,0.05, ' $\overline{IC_{50}}$: ' + '{:.3f}'.format(sample_ic50_dict[chamber_name]["ic50"]) 
+                    + '$\pm$ {:.3f}'.format(sample_ic50_dict[chamber_name]["ic50_error"]) + ' blah', transform=ax.transAxes, fontsize=12,) 
+              
             ax.legend()
             
             return ax
