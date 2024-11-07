@@ -1064,6 +1064,7 @@ class ButtonChamberAssaySeries:
             pattern = "*_{}*/{}/StitchedImages"
 
         p = lambda f: glob(os.path.join(root, pattern.format(f, channel)))[0]
+
         files = {
             (handle, desc, channel): p(handle)
             for handle, desc in zip(file_handles, descriptors)

@@ -87,7 +87,7 @@ class BackgroundImages:
         """
         mp = {"ch": target_channel, "ex": target_exposure, "i": target_index}
         logging.info(
-            "Background Subtracting | Ch: {ch}, Ex: {ex}, Index: {i}".format(**mp)
+            "Background Subtracting | Ch: {}, Ex: {}, File: {}".format(target_channel, target_exposure, target_image_path)
         )
         img_dir = pathlib.Path(target_image_path)
         target = io.imread(img_dir)
@@ -125,6 +125,8 @@ class BackgroundImages:
 
         parse = lambda f: tuple(f.split(".")[0].split("_")[1:3] + [".".join(f.split(".")[0].split("_")[3:])])
 
+        n_files = 0
+
         for root, dirs, files in os.walk(path):
             if ("StitchedImages" in root) | ("Analysis" in root):
                 to_correct = {
@@ -135,3 +137,7 @@ class BackgroundImages:
                     if manual_exposure:  # in case filenames corrupted
                         exposure = manual_exposure
                     self.subtract_background(file, index, channel, int(exposure))
+
+                    n_files += 1
+
+        print('Applied background subtraction to {} images'.format(n_files))
