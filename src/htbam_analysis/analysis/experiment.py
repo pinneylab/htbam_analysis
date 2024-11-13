@@ -1116,6 +1116,7 @@ class HTBAMExperiment:
                     "What should this be?",
                     ]
                 writer.writerow(row)
+
     def export_mm_result_csv(self, path_to_save:str, run_name:str):
 
         chamber_names_dict = self._db_conn.get_chamber_name_dict()
@@ -1203,6 +1204,29 @@ class HTBAMExperiment:
                     "What should this be?",
                     ]
                 writer.writerow(row)
+    
+    
+class BindingExperiment:
+    def __init__(self, db_connection: AbstractHtbamDBAPI):
+        self._db_conn = db_connection
+        print("\nConnected to database.")
+        print("Experiment found with the following runs:")
+        print(self._db_conn.get_run_names())
+        self._run_data = {} 
+
+    def fit_kd_individual(self, rmax: float = None):
+        pass
+
+    def filter_kd(z_score_threshold: float = 3, expression_threshold: float = 3, chambers2exclude: list = []):
+        pass
+
+    def plot_binding_isotherms():
+        pass
+
+    def export_binding_results():
+        pass
+
+
     ##############################
     #### Freiatas W.I.P. Code ####
     ##############################
