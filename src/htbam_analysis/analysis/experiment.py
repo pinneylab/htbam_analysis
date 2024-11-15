@@ -6,13 +6,15 @@ import json
 import os
 import scipy
 from tqdm import tqdm
-from htbam_db_api.htbam_db_api import AbstractHtbamDBAPI
+from htbam_db_api.htbam_db_api import AbstractHtbamDBAPI, BindingDBAPI
 from htbam_analysis.analysis.plotting import plot_chip
 from sklearn.linear_model import LinearRegression
 import inspect
 import seaborn as sns
 from copy import deepcopy
 from scipy.optimize import curve_fit
+
+# from kinetics.functions import *
 
 
 class HTBAMExperiment:
@@ -1207,7 +1209,7 @@ class HTBAMExperiment:
     
     
 class BindingExperiment:
-    def __init__(self, db_connection: AbstractHtbamDBAPI):
+    def __init__(self, db_connection: BindingDBAPI):
         self._db_conn = db_connection
         print("\nConnected to database.")
         print("Experiment found with the following runs:")
@@ -1215,6 +1217,11 @@ class BindingExperiment:
         self._run_data = {} 
 
     def fit_kd_individual(self, rmax: float = None):
+
+
+
+
+
         pass
 
     def filter_kd(z_score_threshold: float = 3, expression_threshold: float = 3, chambers2exclude: list = []):
@@ -1225,6 +1232,15 @@ class BindingExperiment:
 
     def export_binding_results():
         pass
+
+
+class CyclingExperiment:
+    def __init__(self, db_connection):
+        self._db_conn = db_connection
+        print("\nConnected to database.")
+        print("Experiment found with the following runs:")
+        print(self._db_conn.get_run_names())
+        self._run_data = {} 
 
 
     ##############################
