@@ -17,7 +17,7 @@ import re
 import matplotlib.pyplot as plt
 
 from kinetics.functions import *
-from kinecits.interactive import *
+from kinetics.interactive import *
 
 
 class HTBAMExperiment:
