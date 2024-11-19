@@ -1339,12 +1339,6 @@ def calculate_z_scores(data):
     return z
 
 
-def calculate_z_scores(data):
-    mean, std = np.nanmean(data), np.nanstd(data)
-    z = np.abs((data - mean) / std)
-    return z
-
-
 class BindingExperiment:
     def __init__(self, db_connection: BindingDBAPI):
         self._db_conn = db_connection
