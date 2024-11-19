@@ -103,44 +103,35 @@ class BackgroundImages:
 
         logging.debug("Background Subtraction Complete")
 
-def walk_and_bg_subtract(self, path, index, channel, manual_exposure=None):
-        """
-        Walks a directory structure, find images to background subtract, and executes subtraction
+    def walk_and_bg_subtract(self, path, index, channel, manual_exposure=None):
+            """
+            Walks a directory structure, find images to background subtract, and executes subtraction
 
-        Arguments:
-            (str) path: path from hwere to walk
-            (str) index: arbitrary index to select background image
-            (str) channel: channel to select background image
+            Arguments:
+                (str) path: path from hwere to walk
+                (str) index: arbitrary index to select background image
+                (str) channel: channel to select background image
 
-        Returns:
-            None
+            Returns:
+                None
 
-        """
+            """
 
-        parse = lambda f: tuple(f.split(".")[0].split("_")[1:3] + [".".join(f.split(".")[0].split("_")[3:])])
+            parse = lambda f: tuple(f.split(".")[0].split("_")[1:3] + [".".join(f.split(".")[0].split("_")[3:])])
 
-        for root, dirs, files in os.walk(path):
-            if ("StitchedImages" in root) | ("Analysis" in root):
-                parsed_files = {
-                    parse(f): os.path.join(root, f) for f in files
-                }
+            for root, dirs, files in os.walk(path):
+                if ("StitchedImages" in root) | ("Analysis" in root):
+                    parsed_files = {
+                        parse(f): os.path.join(root, f) for f in files
+                    }
 
-                for params, file in parsed_files.items():
+                    for params, file in parsed_files.items():
 
-                    # exposure, channel, and features for image
-                    e, c, f = params
+                        # exposure, channel, and features for image
+                        e, c, f = params
 
-                    # check that the channel in the file handle matches that passed as an arg
-                    if c == channel:
-                        if manual_exposure:  # in case filenames corrupted
-                            e = manual_exposure
-                        self.subtract_background(file, index, channel, int(e))
-            if ("StitchedImages" in root) | ("Analysis" in root):
-                to_correct = {
-                    parse(f): os.path.join(root, f) for f in files if correctable(f)
-                }
-                for params, file in to_correct.items():
-                    exposure, channel, feature = params
-                    if manual_exposure:  # in case filenames corrupted
-                        exposure = manual_exposure
-                    self.subtract_background(file, index, channel, int(exposure))
+                        # check that the channel in the file handle matches that passed as an arg
+                        if c == channel:
+                            if manual_exposure:  # in case filenames corrupted
+                                e = manual_exposure
+                            self.subtract_background(file, index, channel, int(e))
