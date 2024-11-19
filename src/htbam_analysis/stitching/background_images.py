@@ -103,7 +103,7 @@ class BackgroundImages:
 
         logging.debug("Background Subtraction Complete")
 
-    def walk_and_bg_subtract(self, path, index, channel, manual_exposure=None):
+def walk_and_bg_subtract(self, path, index, channel, manual_exposure=None):
         """
         Walks a directory structure, find images to background subtract, and executes subtraction
 
@@ -117,15 +117,24 @@ class BackgroundImages:
 
         """
 
-        correctable = (
-            lambda f: (channel in f)
-            and ("StitchedImage" in f or "StitchedImg" in f)
-            and not ("BGSubtracted" in f)
-        )
-
         parse = lambda f: tuple(f.split(".")[0].split("_")[1:3] + [".".join(f.split(".")[0].split("_")[3:])])
 
         for root, dirs, files in os.walk(path):
+            if ("StitchedImages" in root) | ("Analysis" in root):
+                parsed_files = {
+                    parse(f): os.path.join(root, f) for f in files
+                }
+
+                for params, file in parsed_files.items():
+
+                    # exposure, channel, and features for image
+                    e, c, f = params
+
+                    # check that the channel in the file handle matches that passed as an arg
+                    if c == channel:
+                        if manual_exposure:  # in case filenames corrupted
+                            e = manual_exposure
+                        self.subtract_background(file, index, channel, int(e))
             if ("StitchedImages" in root) | ("Analysis" in root):
                 to_correct = {
                     parse(f): os.path.join(root, f) for f in files if correctable(f)
