@@ -6,7 +6,7 @@ import json
 import os
 import scipy
 from tqdm import tqdm
-from htbam_db_api.htbam_db_api import AbstractHtbamDBAPI, HtbamDBException
+from htbam_db_api.htbam_db_api import AbstractHtbamDBAPI, HtbamDBException, BindingDBAPI
 from htbam_analysis.analysis.plotting import plot_chip
 from sklearn.linear_model import LinearRegression
 import inspect
@@ -15,6 +15,9 @@ from copy import deepcopy
 from scipy.optimize import curve_fit
 import re
 import matplotlib.pyplot as plt
+
+from kinetics.functions import *
+from kinecits.interactive import *
 
 
 class HTBAMExperiment:
@@ -1328,645 +1331,824 @@ class HTBAMExperiment:
         ax.set_xlabel('Substrate')
         ax.set_ylabel(f'Initial Rate ({self.get_concentration_units(run_name)}/s)')
         plt.show()
-    ##############################
-    #### Freiatas W.I.P. Code ####
-    ##############################
 
-    # def __init__(self, file:str, new:bool=False, units_registry=None):
-    #     '''
-    #     Initializes an HTBAM_Experiment object.
-    #     Input:
-    #         file (str): the path to the .HTBAM file to be read.
-    #         new (bool): if True, a new .HTBAM file will be created.
-    #         units_registry (pint.UnitRegistry): a pint unit registry to be used for all units.
-    #     Output:
-    #         None
-    #     '''
 
-    #     super().__init__()
-    #     self._experiment_file = Path(file)
+def calculate_z_scores(data):
+    mean, std = np.nanmean(data), np.nanstd(data)
+    z = np.abs((data - mean) / std)
+    return z
 
-    #     if units_registry is None:
-    #         units_registry = pint.UnitRegistry()
-    #     self.ureg = units_registry
-    #     #make sure these are set up
-    #     self.ureg.setup_matplotlib(True)
-    #     self.ureg.define('RFU = [luminosity]')
 
-    #     #does it have the correct extension?
-    #     if self._experiment_file.suffix != ".HTBAM":
-    #         raise ValueError(f"File {self._experiment_file} does not have the correct extension. Must be .HTBAM")
+def calculate_z_scores(data):
+    mean, std = np.nanmean(data), np.nanstd(data)
+    z = np.abs((data - mean) / std)
+    return z
 
-    #     if not new:
-    #         data = self._get_dict_from_file()
-    #     else:
-    #         data = self._init_dict()
-    #         Path(self._experiment_file).touch()
-    #         self._write_file(data)
 
-    #     #is it the correct version?
-    #     if data["file_version"] != CURRENT_VERSION:
-    #         print(f"Warning: File {self._experiment_file} was created with a different version. You're currently using {CURRENT_VERSION}.")
+class BindingExperiment:
+    def __init__(self, db_connection: BindingDBAPI):
+        self._db_conn = db_connection
+        print("\nConnected to database.")
+        print("Experiment found with the following runs:")
+        print(self._db_conn.get_run_names())
+        self._run_data = {}
 
-    # def __repr__(self) -> str:
-    #     def recursive_string(d: dict, indent: int, width=5) -> str:
-    #         s = "\t"*indent + '{\n'
-    #         for i, (key, value) in enumerate(d.items()):
-    #             if i == width:
-    #                 s += "\t"*indent +"...\n"
-    #                 break
-    #             s += "\t"*indent + f"{key}: "
-    #             if isinstance(value, dict):
-    #                 s += "\n" + recursive_string(value, indent+1)
-    #             else:
-    #                 s += f"{value}\n"
-    #         s += "\t"*indent + '}\n'
-    #         return s
-        
-    #     data = self.get('') #get the whole thing
-    #     return recursive_string(data, 0)
+        self._excluded_variants = {}
+        self._excluded_chambers = {}
+        self._excluded_points = {}
+
+        for run_name in self._db_conn.get_run_names():
+            self._excluded_chambers[run_name] = []
+            self._excluded_points[run_name] = []
+
+    def fit_kd_individual(self, run_name: str, fixed_rmax: float = None):
+
+        chambers, r, l, _ = self._db_conn.get_run_assay_data(run_name, luminance_type='r')
+        r = r.squeeze()
+        inclusion_mask = np.full(r.shape, True)
+
+        if len(self._excluded_chambers[run_name]) > 0:
+            chamber_mask = np.isin(chambers, self._excluded_chambers[run_name])
+            inclusion_mask[chamber_mask, :] = False
+            print('Excluding {} chambers from analysis.'.format(sum(chamber_mask)))
+
+        if len(self._excluded_points[run_name]) > 0:
+            chamber2index = {c:i for i,c in enumerate(chambers)}
+            conc2index = {c:i for i,c in enumerate(l)}
+
+            for point in self._excluded_points:
+                chamber, conc = point
+                i, j = chamber2index.get(chamber), conc2index.get(conc)
+                inclusion_mask[i,j] = False
+
+        model = BindingModel()
+        for i in tqdm(range(len(chambers)), desc='Fitting binding isotherms.'):
+            fit = model.fit(l, r[i][inclusion_mask[i]], fixed_rmax=fixed_rmax)
+            fit['inclusion_mask'] = inclusion_mask[i]
+            self._db_conn.add_analysis(run_name, 'kd_fit_individual', chambers[i], fit)
+
+    def set_excluded_variants(self, run_name: str, variants: list):
+        all_variants, chambers = zip(*[(d['id'], c) for c, d in self._db_conn._json_dict['chamber_metadata'].items()])
+        all_variants, chambers = np.array(all_variants), np.array(chambers)
+        excluded_chambers = chambers[np.isin(all_variants, variants)].tolist()
+        self._excluded_chambers[run_name] += excluded_chambers
+
+    def set_excluded_chambers(self, run_name: str, chambers: list):
+        self._excluded_chambers[run_name] += chambers
+
+    def set_excluded_points(self, run_name: str, chambers: list, x: list):
+        self._excluded_points[run_name] = list(zip(chambers, x))
+
+    def plot_binding_isotherms_chip(self):
+        pass
+
+    def plot_binding_isotherms(self, 
+        run_name: str,
+        analysis_name: str = None,
+        sharex: bool = False, 
+        sharey: bool = False,
+        n_rows: int = 2, 
+        n_cols: int = 2, 
+        continuous_update: bool = False,
+        ylim: tuple = None
+        ):
+        """ 
+        analysis_name: str = None - if left blank, will only plot raw data and not fits.
+        """
+
+        conc_unit = self._db_conn.get_concentration_units(run_name)
+        substrate = self._db_conn.get_substrate_name(run_name)
+
+        chambers, r, l, _ = self._db_conn.get_run_assay_data(run_name, luminance_type='r')
+        variants = [self._db_conn._json_dict['chamber_metadata'][c]['id'] for c in chambers]
+        r = r.squeeze()
+        l = np.vstack([l] * len(r))
+
+
+
+        if analysis_name in self._db_conn._json_dict['runs'][run_name]['analyses'].keys():
+
+            model = BindingModel()
+            fits = [self._db_conn._json_dict['runs'][run_name]['analyses'][analysis_name]['chambers'][c] for c in chambers]
+
+            titles = [
+                '{} / {} / {:.2f} {}'.format(
+                    chambers[i], 
+                    variants[i], 
+                    fits[i]['kd'], 
+                    conc_unit
+                    ) for i in range(len(chambers))
+                    ]
+
+            figure = plot_data_and_fits(l, r, fits, model, '[{}] ({})'.format(substrate, conc_unit), 'r', sharex, sharey, n_rows, n_cols, titles, continuous_update, ylim)
+
+        else:
+            titles = [
+                '{} / {}'.format(
+                    chambers[i], 
+                    variants[i], 
+                    ) for i in range(len(chambers))
+                    ]
+            figure = plot_data(l, r, '[{}] ({})'.format(substrate, conc_unit), 'r', sharex, sharey, n_rows, n_cols, titles, continuous_update)
+
+        return figure        
+
+    def filter_kd(
+            self,
+            run_name: str,
+            z_score_threshold: float = 3, 
+            expression_threshold: float = 1,
+            min_replicates: int = 3
+            ):
+
+        # track number of replicates for logging purposes
+        _n_replicates = []
+
+        # create a dictionary for sample analyses
+        self._db_conn._json_dict['runs'][run_name]['analyses']['kd_filtered'] = {'samples': {}}
+
+        for name, chambers in self._db_conn.get_chamber_name_to_id_dict().items():
+
+            kd_arr = np.array([self._db_conn._json_dict['runs'][run_name]['analyses']['kd_fit_individual']['chambers'][c]['kd'] for c in chambers])
+            enzyme_conc_arr = np.array([self._db_conn._json_dict['button_quant']['chambers'][c]['enzyme_conc'] for c in chambers])
+
+            if np.all(np.isnan(kd_arr)):
+                print('No values from sample {}, all pre-filtered.'.format(name))
+                continue
+
+            # calculate filters
+            z = calculate_z_scores(kd_arr)
+            z_score_filter = z < z_score_threshold
+            expression_filter = enzyme_conc_arr > expression_threshold
+            nan_filter = ~np.isnan(kd_arr)
+            positive_filter = kd_arr > 0
+
+            # filter kd
+            kd_arr_filtered = kd_arr[expression_filter & z_score_filter & nan_filter & positive_filter]
+            if len(kd_arr_filtered) < min_replicates:
+                print('Not enough replicates for sample {}. Skipping.'.format(name))
+                continue
+
+            # add sample analysis to db_conn
+            self._db_conn._json_dict['runs'][run_name]['analyses']['kd_filtered']['samples'][name] = {
+                'kd': kd_arr_filtered.mean(),
+                'kd_error': kd_arr_filtered.std(),
+                'kd_replicates': kd_arr_filtered
+                }
+
+            _n_replicates.append(len(kd_arr_filtered))
+
+        print('Average number of replicates per sample post-filtering: {}'.format(int(np.round(np.mean(_n_replicates), 0))))
+
+    def export_binding_results(self, run_name: str):
+        ids, replicates, kd, kd_stdev = [], [], [], []
+        for name, data in self._db_conn._json_dict['runs'][run_name]['analyses']['kd_filtered']['samples'].items():
+            ids.append(name)
+            kd.append(data['kd'])
+            kd_stdev.append(data['kd_error'])
+            replicates.append(len(data['kd_replicates']))
+        return pd.DataFrame({'id': ids, 'replicates': replicates, 'kd': kd, 'kd_stdev': kd_stdev})
+
+
+##############################
+#### Freiatas W.I.P. Code ####
+##############################
+
+# def __init__(self, file:str, new:bool=False, units_registry=None):
+#     '''
+#     Initializes an HTBAM_Experiment object.
+#     Input:
+#         file (str): the path to the .HTBAM file to be read.
+#         new (bool): if True, a new .HTBAM file will be created.
+#         units_registry (pint.UnitRegistry): a pint unit registry to be used for all units.
+#     Output:
+#         None
+#     '''
+
+#     super().__init__()
+#     self._experiment_file = Path(file)
+
+#     if units_registry is None:
+#         units_registry = pint.UnitRegistry()
+#     self.ureg = units_registry
+#     #make sure these are set up
+#     self.ureg.setup_matplotlib(True)
+#     self.ureg.define('RFU = [luminosity]')
+
+#     #does it have the correct extension?
+#     if self._experiment_file.suffix != ".HTBAM":
+#         raise ValueError(f"File {self._experiment_file} does not have the correct extension. Must be .HTBAM")
+
+#     if not new:
+#         data = self._get_dict_from_file()
+#     else:
+#         data = self._init_dict()
+#         Path(self._experiment_file).touch()
+#         self._write_file(data)
+
+#     #is it the correct version?
+#     if data["file_version"] != CURRENT_VERSION:
+#         print(f"Warning: File {self._experiment_file} was created with a different version. You're currently using {CURRENT_VERSION}.")
+
+# def __repr__(self) -> str:
+#     def recursive_string(d: dict, indent: int, width=5) -> str:
+#         s = "\t"*indent + '{\n'
+#         for i, (key, value) in enumerate(d.items()):
+#             if i == width:
+#                 s += "\t"*indent +"...\n"
+#                 break
+#             s += "\t"*indent + f"{key}: "
+#             if isinstance(value, dict):
+#                 s += "\n" + recursive_string(value, indent+1)
+#             else:
+#                 s += f"{value}\n"
+#         s += "\t"*indent + '}\n'
+#         return s
     
-    # def get(self, path):
-    #     '''
-    #     Returns the data from a given "path" in the database.
-    #     Input: 
-    #         path (str): the "path" to the data to be returned.
-    #             ex: "runs/standard_0/assays/0/chambers/1,1/sum_chamber"
-    #     Output:
-    #         data: the data at the given path.
-    #     '''
-    #     #is path a str or Path object?
-    #     if type(path) == str:
-    #         path = Path(path)
+#     data = self.get('') #get the whole thing
+#     return recursive_string(data, 0)
 
-    #     #if root, return the whole thing
-    #     if path == "":
-    #         return self._get_dict_from_file()
-        
-    #     #split the path object:
-    #     path = path.parts
-    #     data = self._get_dict_from_file()
-    #     path_traversed = ""
-    #     for p in path:
-    #         # TODO: get wildcard working, like db.get('runs/standard_0/assays/*/chambers/1,1/sum_chamber')
-    #         # if p == "*":
-    #         #     #if we're at a wildcard, find the matching values in ALL children:
-    #         #     if type(data) == dict:
-    #         #         children = list(data.keys())
-    #         #     else:
-    #         #         raise ValueError(f"Wildcard found at {path_traversed}, which is a {type(data)}. Wildcards can only be used on dicts.")
-    #         #     data_list = [self.get(path_traversed + child + "/") for child in children]
-    #         #     for d in data_list:
-    #         #         print(d)
-    #         #     data = np.concatenate(data_list)
-    #         #     return data
-            
-    #         #handle errors
-    #         if p not in data:
-    #             error_string = f"Path {path_traversed+p} not found in database. \n"
-    #             if type(data) == dict:
-    #                 error_string += f"Made it to {path_traversed}, which has keys {data.keys()}"
-    #             else:
-    #                 error_string += f"Made it to {path_traversed}, which is a {type(data)}"
-    #             raise ValueError(error_string)
-    #         data = data[p]
-    #         path_traversed += p + "/"
+# def get(self, path):
+#     '''
+#     Returns the data from a given "path" in the database.
+#     Input: 
+#         path (str): the "path" to the data to be returned.
+#             ex: "runs/standard_0/assays/0/chambers/1,1/sum_chamber"
+#     Output:
+#         data: the data at the given path.
+#     '''
+#     #is path a str or Path object?
+#     if type(path) == str:
+#         path = Path(path)
 
-    #     #if this is a quantity, convert to a pint.Quantity
-    #     if type(data) == dict:
-    #         if 'is_quantity' in data.keys() and data['is_quantity']:
-    #             data = self._dict_to_quantity(data)
-
-    #     # #if this is a dict, convert all quantities to pint.Quantities
-    #     # if type(data) == dict:
-    #     #     data = self._make_quantities_from_serialized_dict(data)
-        
-    #     return data
+#     #if root, return the whole thing
+#     if path == "":
+#         return self._get_dict_from_file()
     
-    # ##########################################################################################
-    # ########################### READING / WRITING to/from FILE  ##############################
-    # ##########################################################################################
-
-    # def _init_dict(self) -> dict:
-    #     '''
-    #     Populates an initial dictionary with chamber specific metadata.
-    #             Parameters:
-    #                     None
-
-    #             Returns:
-    #                     None
-    #     '''        
-    #     return {
-    #         "file_version": CURRENT_VERSION,
-    #         "chamber_metadata": {},
-    #         "button_quant": {},
-    #         "runs": {},
-    #     }
-
-    # def _get_dict_from_file(self) -> dict:
-    #     '''
-    #     Returns the dictionary stored in the .HTBAM file.
-    #         Parameters: None
-    #         Returns: json_dict (dict): Dictionary stored in the .HTBAM file.
-    #     '''
-    #     with open(self._experiment_file, 'r') as fp:
-    #         json_dict = json.load(fp)
-    #     return json_dict
-
-    # def _write_file(self, data):
-    #     '''This writes the database to file, as a dict -> json.
-    #     This will overwrite the existing file.'''
-    #     with open(self._experiment_file, 'w') as fp:
-    #         json.dump(data, fp, indent=4)
-
-    # def _update_file(self, path, new_data):
-    #     '''This appends data to a given path in the database'''
-    #     #is path a str or Path object?
-    #     if type(path) == str:
-    #         path = Path(path)
-
-    #     #is new_data a quantity? If so, convert to dict
-    #     if type(new_data) == pint.Quantity:
-    #         new_data = self._quantity_to_dict(new_data)
-
-    #     path = path.parts
-    #     full_data = self._get_dict_from_file()
-    #     current_data = full_data #this will be updated as we traverse the path
-    #     path_traversed = ""
-
-    #     #N.B.: If anything is passed by value instead of by reference, this will break.
-    #     for p in path[:-1]:
-    #         #handle errors
-    #         if p not in current_data:
-    #             error_string = f"Path {path_traversed+p} not found in database. \n"
-    #             if type(current_data) == dict:
-    #                 error_string += f"Made it to {path_traversed}, which has keys {current_data.keys()}"
-    #             else:
-    #                 error_string += f"Made it to {path_traversed}, which is a {type(current_data)}"
-    #             raise ValueError(error_string)
-            
-    #         #continue down the path
-    #         current_data = current_data[p]
-    #         path_traversed += p + "/"
-
-    #     #update the data
-    #     if path[-1] in current_data: 
-    #         if current_data[path[-1]] != {}: #We can't overwrite data, but we'll allow overwriting blank placeholder dicts.
-    #             raise ValueError(f"Path {path_traversed+path[-1]} already exists in database. Overwriting data is forbidden.")
-    #     current_data[path[-1]] = new_data
+#     #split the path object:
+#     path = path.parts
+#     data = self._get_dict_from_file()
+#     path_traversed = ""
+#     for p in path:
+#         # TODO: get wildcard working, like db.get('runs/standard_0/assays/*/chambers/1,1/sum_chamber')
+#         # if p == "*":
+#         #     #if we're at a wildcard, find the matching values in ALL children:
+#         #     if type(data) == dict:
+#         #         children = list(data.keys())
+#         #     else:
+#         #         raise ValueError(f"Wildcard found at {path_traversed}, which is a {type(data)}. Wildcards can only be used on dicts.")
+#         #     data_list = [self.get(path_traversed + child + "/") for child in children]
+#         #     for d in data_list:
+#         #         print(d)
+#         #     data = np.concatenate(data_list)
+#         #     return data
         
-    #     #write to file
-    #     #now, we've iterated down our full dict and changed some part of it. We'll pass back the full dict.
-    #     self._write_file(full_data)
+#         #handle errors
+#         if p not in data:
+#             error_string = f"Path {path_traversed+p} not found in database. \n"
+#             if type(data) == dict:
+#                 error_string += f"Made it to {path_traversed}, which has keys {data.keys()}"
+#             else:
+#                 error_string += f"Made it to {path_traversed}, which is a {type(data)}"
+#             raise ValueError(error_string)
+#         data = data[p]
+#         path_traversed += p + "/"
 
-    # ##########################################################################################
-    # ######################### SERIALIZE / DESERIALIZE QUANTITY DATA ##########################
-    # ##########################################################################################
-    # def _dict_to_quantity(self, data: dict) -> pint.Quantity:
-    #     '''
-    #     Converts a dictionary with keys 'values', 'unit', and 'is_quantity' to a pint.Quantity.
-    #     This allows us to receive our data from a json file.
-    #     '''
-    #     if not data['is_quantity']:
-    #         raise ValueError("Data is not a quantity.")
-        
-    #     try:
-    #         return np.array(data['values']) * self.ureg(data['unit'])
-    #     except:
-    #         raise ValueError(f"Could not convert data to quantity. Data: {data}")
-        
-    # def _quantity_to_dict(self, quantity: pint.Quantity) -> dict:
-    #     '''
-    #     Converts a pint.Quantity to a dictionary with keys 'values', 'unit', and 'is_quantity'.
-    #     The reason we need this is so we can store our data in a JSON. json.dump() can't handle np.arrays or pint.Quantities.
-    #     '''
-    #     return {
-    #         'values': quantity.magnitude.tolist(),
-    #         'unit': str(quantity.units),
-    #         'is_quantity': True
-    #     }
+#     #if this is a quantity, convert to a pint.Quantity
+#     if type(data) == dict:
+#         if 'is_quantity' in data.keys() and data['is_quantity']:
+#             data = self._dict_to_quantity(data)
+
+#     # #if this is a dict, convert all quantities to pint.Quantities
+#     # if type(data) == dict:
+#     #     data = self._make_quantities_from_serialized_dict(data)
     
-    # def _make_serializable_dict(self, data: dict) -> dict:
-    #     '''
-    #     Converts all pint.Quantities in a dictionary to dictionaries with keys 'values', 'unit', and 'is_quantity'.
-    #     This allows us to store our data in a JSON. json.dump() can't handle np.arrays or pint.Quantities.
-    #     '''
-    #     for key, value in data.items():
-    #         if isinstance(value, pint.Quantity):
-    #             data[key] = self._quantity_to_dict(value)
-    #         elif isinstance(value, dict):
-    #             data[key] = self._make_serializable_dict(value)
-    #     return data
+#     return data
+
+# ##########################################################################################
+# ########################### READING / WRITING to/from FILE  ##############################
+# ##########################################################################################
+
+# def _init_dict(self) -> dict:
+#     '''
+#     Populates an initial dictionary with chamber specific metadata.
+#             Parameters:
+#                     None
+
+#             Returns:
+#                     None
+#     '''        
+#     return {
+#         "file_version": CURRENT_VERSION,
+#         "chamber_metadata": {},
+#         "button_quant": {},
+#         "runs": {},
+#     }
+
+# def _get_dict_from_file(self) -> dict:
+#     '''
+#     Returns the dictionary stored in the .HTBAM file.
+#         Parameters: None
+#         Returns: json_dict (dict): Dictionary stored in the .HTBAM file.
+#     '''
+#     with open(self._experiment_file, 'r') as fp:
+#         json_dict = json.load(fp)
+#     return json_dict
+
+# def _write_file(self, data):
+#     '''This writes the database to file, as a dict -> json.
+#     This will overwrite the existing file.'''
+#     with open(self._experiment_file, 'w') as fp:
+#         json.dump(data, fp, indent=4)
+
+# def _update_file(self, path, new_data):
+#     '''This appends data to a given path in the database'''
+#     #is path a str or Path object?
+#     if type(path) == str:
+#         path = Path(path)
+
+#     #is new_data a quantity? If so, convert to dict
+#     if type(new_data) == pint.Quantity:
+#         new_data = self._quantity_to_dict(new_data)
+
+#     path = path.parts
+#     full_data = self._get_dict_from_file()
+#     current_data = full_data #this will be updated as we traverse the path
+#     path_traversed = ""
+
+#     #N.B.: If anything is passed by value instead of by reference, this will break.
+#     for p in path[:-1]:
+#         #handle errors
+#         if p not in current_data:
+#             error_string = f"Path {path_traversed+p} not found in database. \n"
+#             if type(current_data) == dict:
+#                 error_string += f"Made it to {path_traversed}, which has keys {current_data.keys()}"
+#             else:
+#                 error_string += f"Made it to {path_traversed}, which is a {type(current_data)}"
+#             raise ValueError(error_string)
+        
+#         #continue down the path
+#         current_data = current_data[p]
+#         path_traversed += p + "/"
+
+#     #update the data
+#     if path[-1] in current_data: 
+#         if current_data[path[-1]] != {}: #We can't overwrite data, but we'll allow overwriting blank placeholder dicts.
+#             raise ValueError(f"Path {path_traversed+path[-1]} already exists in database. Overwriting data is forbidden.")
+#     current_data[path[-1]] = new_data
     
-    # def _make_quantities_from_serialized_dict(self, data: dict) -> dict:
-    #     '''
-    #     Converts all dictionaries with keys 'values', 'unit', and 'is_quantity' to pint.Quantities.
-    #     This allows us to receive our data from a json file.
-    #     '''
-    #     for key, value in data.items():
-    #         if isinstance(value, dict):
-    #             if 'is_quantity' in value.keys() and value['is_quantity']:
-    #                 data[key] = self._dict_to_quantity(value)
-    #             else:
-    #                 data[key] = self._make_quantities_from_serialized_dict(value)
-    #     return data
+#     #write to file
+#     #now, we've iterated down our full dict and changed some part of it. We'll pass back the full dict.
+#     self._write_file(full_data)
 
-    # ##########################################################################################
-    # ######################### LOADING EXPERIMENT DATA FROM CSVs  #############################
-    # ##########################################################################################
-    # #(make _load_chamber_metadata !)
-    # def _load_chamber_metadata(self,standard_data_df) -> None:
-    #     '''
-    #     Populates an json_dict with kinetic data with the following schema:
-    #     {button_quant: {
-         
-    #         1,1: {
-    #             sum_chamber: {'values': [...],
-    #                         'unit': 'RFU',
-    #                         'is_quantity': True},
-    #             std_chamber: {'values': [...],
-    #                         'unit': 'RFU',
-    #                         'is_quantity': True},
-    #         },
-    #         ...
-    #         }}
-
-    #     Parameters:
-    #         standard_data_df (pd.DataFrame): Dataframe from standard curve
-
-    #     Returns:
-    #         None
-    #     '''    
-    #     unique_chambers = standard_data_df[['id','x_center_chamber', 'y_center_chamber', 'radius_chamber', 
-    #         'xslice', 'yslice', 'indices']].drop_duplicates(subset=["indices"]).set_index("indices")
-    #     self._update_file(Path("chamber_metadata"), unique_chambers.to_dict("index") )
-
-    # def load_standard_data_from_file(self, standard_curve_data_path: str, standard_name: str, standard_type: str, standard_units: str) -> None:
-    #     '''
-    #     Populates an dict with standard curve data with the following schema, and saves to the .HTBAM file:
-    #     {standard_run_#: {
-    #         name: str,
-    #         type: str,
-    #         assays: {
-    #             1: {
-    #                 conc: float,
-    #                 time:
-    #                     {'values': [...],
-    #                     'unit': 's',
-    #                     'is_quantity': True},
-    #                 chambers: {
-    #                     1,1: {
-    #                         sum_chamber: {'values': [...],
-    #                                       'units': 'RFU',
-    #                                       'is_quantity': True},
-    #                         std_chamber: {'values': [...],
-    #                                       'unit': 'RFU'}
-    #                                       'is_quantity': True},
-    #                     },
-    #                     ...
-    #                     }}}}
-
-    #     Parameters:
-    #         standard_curve_data_path (str): Path to standard curve data
-    #         standard_name (str): Name of standard curve
-    #         standard_type (str): Type of standard curve
-    #         standard_units (str): Units of standard curve
-
-    #     Returns:
-    #             None
-    #     '''
-    #     #First, check if our standard_units is a valid unit of concentration:
-    #     if self.ureg(standard_units).dimensionality != self.ureg.molar.dimensionality:
-    #         raise ValueError(f"Units {standard_units} are not a valid unit of concentration.\nIs your capitalization correct?")
-        
-    #     standard_data_df = pd.read_csv(standard_curve_data_path)
-    #     standard_data_df['indices'] = standard_data_df.x.astype('str') + ',' + standard_data_df.y.astype('str')
-    #     i = 0    
-    #     std_assay_dict = {}
-    #     #TODO: this bad convention of column names will be phased out soon.
-    #     for prod_conc, subset in standard_data_df.groupby("concentration_uM"):
-    #         squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=['sum_chamber', 'std_chamber'])
-    #         squeezed["time_s"] = pd.Series([[0]]*len(squeezed), index=squeezed.index) #this tomfoolery is used to create a list with a single value, 0, for the standard curve assays.
-            
-    #         #turn prod_conc into a pint.Quantity:
-    #         prod_conc = np.array(prod_conc) * self.ureg(standard_units)
-            
-    #         #turn it into a pint.Quantity:
-    #         time_quantity = squeezed.iloc[0]["time_s"] * self.ureg("s")
-
-    #         #now, we need to properly format the data for each chamber:
-    #         chambers_dict_unformatted = squeezed.drop(columns=["time_s", "indices"]).to_dict("index")
-    #         chambers_dict = {}
-    #         for chamber_coord, chamber_data in chambers_dict_unformatted.items():
-    #             chambers_dict[chamber_coord]  = {}
-    #             for key, value in chamber_data.items():
-    #                 #convert to pint.Quantity:
-    #                 chambers_dict[chamber_coord][key] = value * self.ureg("RFU")
-
-    #         #make dict for each assay
-    #         std_assay_dict[i] = {
-    #             "conc": prod_conc, #serialize using our custom _quantity_to_dict function
-    #             "time": time_quantity, 
-    #             "chambers": chambers_dict}
-            
-    #         i += 1
-
-    #     std_run_num = len([key for key in self.get(Path('runs')) if "standard_" in key])
-    #     standard_data_dict = {
-    #         "name": standard_name,
-    #         "type": standard_type,
-    #         "assays": std_assay_dict
-    #         }
-        
-    #     #append to file
-    #     standard_data_dict = self._make_serializable_dict(standard_data_dict) #convert all quantities to dicts so we can save to json
-    #     self._update_file(Path("runs") / f"standard_{std_run_num}", standard_data_dict)
-        
-    #     #update chamber metadata
-    #     self._load_chamber_metadata(standard_data_df)
-       
-    # def load_kinetics_data_from_file(self, kinetic_data_path: str, kinetic_name: str, kinetic_type: str, kinetic_units: str) -> None:
-    #     '''
-    #     Populates an dict with kinetic data with the following schema, and saves to the .HTBAM file:
-    #     {kinetics_run_#: {
-    #         name: str,
-    #         type: str,
-    #         assays: {
-    #             1: {
-    #                 conc: float,
-    #                 time: {'values': [...],
-    #                         'unit': 's',
-    #                         'is_quantity': True},,
-    #                 chambers: {
-    #                     1,1: {
-    #                         sum_chamber: {'values': [...],
-    #                                       'unit': 'RFU',
-    #                                       'is_quantity': True},
-    #                         std_chamber: {'values': [...],
-    #                                       'unit': 'RFU'}
-    #                                       'is_quantity': True},
-    #                     },
-    #                     ...
-    #                     }}}}
-
-    #     Parameters:
-    #         kinetic_data_path (str): Path to kinetic data
-    #         kinetic_name (str): Name of kinetic data
-    #         kinetic_type (str): Type of kinetic data
-    #         kinetic_units (str): Units of kinetic data
-
-    #     Returns:
-    #             None
-    #     '''    
-
-    #     kinetic_data_df = pd.read_csv(kinetic_data_path)
-    #     kinetic_data_df['indices'] = kinetic_data_df.x.astype('str') + ',' + kinetic_data_df.y.astype('str')
-
-    #     def parse_concentration(conc_str: str):
-    #         '''
-    #         Currently, we're storing substrate concentration as a string in the kinetics data.
-    #         This will be changed in the future to store as a float + unit as a string. For now,
-    #         we will parse jankily.
-    #         '''
-    #         print('Warning: parsing concentration from string')
-    #         #first, remove the unit and everything following
-    #         conc = conc_str.split(kinetic_units)[0]
-    #         #concentration number uses underscore as decimal point. Here, we replace and convert to a float:
-    #         conc = float(conc.replace("_", "."))
-    #         return conc
-        
-    #     i = 0    
-    #     kin_dict = {}
-    #     for sub_conc, subset in kinetic_data_df.groupby("series_index"):
-    #         squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=["time_s",'sum_chamber', 'std_chamber'])
-            
-    #         #turn sub_conc into a pint.Quantity:
-    #         sub_conc = np.array(parse_concentration(sub_conc)) * self.ureg(kinetic_units)
-
-    #         #turn time into a pint.Quantity:
-    #         time_quantity = np.array(squeezed.iloc[0]["time_s"]) * self.ureg("s")
-
-    #         #now, we need to properly format the data for each chamber:
-    #         chambers_dict_unformatted = squeezed.drop(columns=["time_s", "indices"]).to_dict("index")
-    #         chambers_dict = {}
-    #         for chamber_coord, chamber_data in chambers_dict_unformatted.items():
-    #             chambers_dict[chamber_coord]  = {}
-    #             for key, value in chamber_data.items():
-    #                 #convert to pint.Quantity:
-    #                 chambers_dict[chamber_coord][key] = value * self.ureg("RFU")
-
-    #         #make dict for each assay
-    #         kin_dict[i] = {
-    #             "conc": sub_conc, 
-    #             "time": time_quantity,
-    #             "chambers": chambers_dict}
-    #         i += 1
-
-    #     kinetics_run_num = len([key for key in self.get(Path('runs')) if "kinetics_" in key])
-    #     kinetics_data_dict = {
-    #         "name": kinetic_name,
-    #         "type": kinetic_type,
-    #         "assays": kin_dict
-    #     }
-        
-    #     #append to file
-    #     kinetics_data_dict = self._make_serializable_dict(kinetics_data_dict) #convert all quantities to dicts so we can save to json
-    #     self._update_file(Path("runs") / f"kinetics_{kinetics_run_num}", kinetics_data_dict)
-
-    # def load_button_quant_data_from_file(self, kinetic_data_path: str) -> None:
-    #     '''
-    #     Populates an json_dict with kinetic data with the following schema:
-    #     {button_quant: {
-         
-    #         1,1: {
-    #             sum_chamber: [...],
-    #             std_chamber: [...]
-    #         },
-    #         ...
-    #         }}
-
-    #             Parameters:
-    #                     None
-
-    #             Returns:
-    #                     None
-    #     '''    
-    #     kinetic_data_df = pd.read_csv(kinetic_data_path)
-    #     kinetic_data_df['indices'] = kinetic_data_df.x.astype('str') + ',' + kinetic_data_df.y.astype('str')
-    #     try:
-    #         unique_buttons = kinetic_data_df[["summed_button_Button_Quant","summed_button_BGsub_Button_Quant",
-    #         "std_button_Button_Quant", "indices"]].drop_duplicates(subset=["indices"]).set_index("indices")
-    #     except KeyError:
-    #         raise HtbamDBException("ButtonQuant columns not found in kinetic data.")
-            
-    #     button_quant_dict = unique_buttons.to_dict("index")
-    #     #convert to pint.Quantity:
-    #     for chamber_coord, chamber_dict in button_quant_dict.items():
-    #         for key, value in chamber_dict.items():
-    #             button_quant_dict[chamber_coord][key] = np.array([value]) * self.ureg("RFU")
-
-
-    #     button_quant_dict = self._make_serializable_dict(button_quant_dict) #convert all quantities to dicts so we can save to json
-    #     self._update_file("button_quant", button_quant_dict)
-
-
-    # ##########################################################################################
-    # ############################## UTILITIES: ANALYSIS  ######################################
-    # ##########################################################################################
-    # def get_chamber_coords(self):
-    #     '''
-    #     Returns the chamber ids for a given run.
-    #     Input:
-    #         None
-    #     Output:
-    #         chamber_ids: an array of the chamber ids (in the format '1,1' ... '32,56')
-    #             shape: (n_chambers,)
-    #     '''
-    #     chamber_coords = np.array(list(self.get('chamber_metadata').keys()))
-    #     return chamber_coords
-
-    # def get_chamber_names(self):
-    #     '''
-    #     Returns the chamber names for a given run.
-    #     Input:
-    #         None
-    #     Output:
-    #         chamber_names: an array of the chamber names (in the format 'ecADK'...)
-    #             shape: (n_chambers,)
-    #     '''
-    #     metadata_dict = self.get('chamber_metadata')
-    #     chamber_coords = self.get_chamber_coords() #this way chamber_coords and chamber_names are always the same order.
-    #     chamber_names = np.array([metadata_dict[chamber_coord]['id'] for chamber_coord in chamber_coords])
-    #     return chamber_names
+# ##########################################################################################
+# ######################### SERIALIZE / DESERIALIZE QUANTITY DATA ##########################
+# ##########################################################################################
+# def _dict_to_quantity(self, data: dict) -> pint.Quantity:
+#     '''
+#     Converts a dictionary with keys 'values', 'unit', and 'is_quantity' to a pint.Quantity.
+#     This allows us to receive our data from a json file.
+#     '''
+#     if not data['is_quantity']:
+#         raise ValueError("Data is not a quantity.")
     
-    # def get_run_data(self, run_name):
-    #     '''
-    #     Returns the data from a given run as numpy arrays.
-    #     Input: 
-    #         run_name (str): the name of the run to be converted to numpy arrays.
-    #     Output:
-    #         chamber_ids: an array of the chamber ids (in the format '1,1' ... '32,56')
-    #             shape: (n_chambers,)
-    #         luminance_data: an array of the luminance data for each chamber
-    #             shape: (n_time_points, n_chambers, n_assays)
-    #         conc_data: an array of the concentration data for each chamber.
-    #             shape: (n_assays,)
-    #         time_data: an array of the time data for each time point.
-    #             shape: (n_time_points, n_assays)
-    #     '''
-    #     #get data from this run as a dict:
-    #     run_data = self.get(Path("runs") / run_name)
-    #     #convert all serialized quantities to pint.Quantities:
-    #     run_data = self._make_quantities_from_serialized_dict(run_data)
+#     try:
+#         return np.array(data['values']) * self.ureg(data['unit'])
+#     except:
+#         raise ValueError(f"Could not convert data to quantity. Data: {data}")
+    
+# def _quantity_to_dict(self, quantity: pint.Quantity) -> dict:
+#     '''
+#     Converts a pint.Quantity to a dictionary with keys 'values', 'unit', and 'is_quantity'.
+#     The reason we need this is so we can store our data in a JSON. json.dump() can't handle np.arrays or pint.Quantities.
+#     '''
+#     return {
+#         'values': quantity.magnitude.tolist(),
+#         'unit': str(quantity.units),
+#         'is_quantity': True
+#     }
 
-    #     #get chamber_coords from file:
-    #     chamber_coords = np.array(list(self.get('chamber_metadata').keys()))
-    #     luminance_data = None
-    #     time_data = None
-    #     conc_data = np.array([])
+# def _make_serializable_dict(self, data: dict) -> dict:
+#     '''
+#     Converts all pint.Quantities in a dictionary to dictionaries with keys 'values', 'unit', and 'is_quantity'.
+#     This allows us to store our data in a JSON. json.dump() can't handle np.arrays or pint.Quantities.
+#     '''
+#     for key, value in data.items():
+#         if isinstance(value, pint.Quantity):
+#             data[key] = self._quantity_to_dict(value)
+#         elif isinstance(value, dict):
+#             data[key] = self._make_serializable_dict(value)
+#     return data
 
-    #     #Each assay may have recorded a different # of time points.
-    #     #First, we'll just check what the max # of time points is:
-    #     max_time_points = 0
-    #     for assay in run_data['assays'].keys():
-    #         current_assay_time_points = len(run_data['assays'][assay]['time'])
-    #         if current_assay_time_points > max_time_points:
-    #             max_time_points = current_assay_time_points
+# def _make_quantities_from_serialized_dict(self, data: dict) -> dict:
+#     '''
+#     Converts all dictionaries with keys 'values', 'unit', and 'is_quantity' to pint.Quantities.
+#     This allows us to receive our data from a json file.
+#     '''
+#     for key, value in data.items():
+#         if isinstance(value, dict):
+#             if 'is_quantity' in value.keys() and value['is_quantity']:
+#                 data[key] = self._dict_to_quantity(value)
+#             else:
+#                 data[key] = self._make_quantities_from_serialized_dict(value)
+#     return data
 
-    #     for assay in run_data['assays'].keys():
-    #         #to make things easier later, we'll be sorting the datapoints by time value.
-    #         #Get time data:
-    #         current_time_array = run_data['assays'][assay]['time']
-    #         current_time_array = current_time_array.astype(float) #so we can pad with NaNs
-    #         #pad the array with NaNs if there are fewer time points than the max
-    #         current_time_array = np.pad(current_time_array, (0, max_time_points - len(current_time_array)), 'constant', constant_values=np.nan)
-    #         #sort, and capture sorting idxs:
-    #         sorting_idxs = np.argsort(current_time_array)
-    #         current_time_array = current_time_array[sorting_idxs]
-    #         current_time_array = np.expand_dims(current_time_array, axis=1)
-    #         #add to our dataset
-    #         if time_data is None:
-    #             time_data = current_time_array
-    #         else:
-    #             time_data = np.concatenate([time_data, current_time_array], axis=1)
-
-    #         #Get luminance data:
-    #         current_luminance_array = None
-    #         for chamber_idx in chamber_coords:
-    #             #collect from DB
-    #             current_chamber_array = run_data['assays'][assay]['chambers'][chamber_idx]['sum_chamber']
-    #             #set type to float:
-    #             current_chamber_array = current_chamber_array.astype(float)
-    #             #pad the array with NaNs if there are fewer time points than the max
-    #             current_chamber_array = np.pad(current_chamber_array, (0, max_time_points - len(current_chamber_array)), 'constant', constant_values=np.nan)
-    #             #sort by time:
-    #             current_chamber_array = current_chamber_array[sorting_idxs]
-    #             #add a dimension at the end:
-    #             current_chamber_array = np.expand_dims(current_chamber_array, axis=1)
-
-    #             if current_luminance_array is None:
-    #                 current_luminance_array = current_chamber_array
-    #             else:
-    #                 current_luminance_array = np.concatenate([current_luminance_array, current_chamber_array], axis=1)
-    #         #add a dimension at the end:
-    #         current_luminance_array = np.expand_dims(current_luminance_array, axis=2)
-    #         #add to our dataset
-    #         if luminance_data is None:
-    #             luminance_data = current_luminance_array
-    #         else:
-    #             luminance_data = np.concatenate([luminance_data, current_luminance_array], axis=2)
-            
-    #         #Get concentration data:
-    #         #collect from DB
-    #         current_conc = run_data['assays'][assay]['conc']
-    #         conc_data = np.append(conc_data, current_conc)
-
-    #     #sort once more, by conc_data:
-    #     sorting_idxs = np.argsort(conc_data)
-    #     conc_data = conc_data[sorting_idxs]
-
-    #     #sort luminance data by conc_data:
-    #     luminance_data = luminance_data[:,:,sorting_idxs]
+# ##########################################################################################
+# ######################### LOADING EXPERIMENT DATA FROM CSVs  #############################
+# ##########################################################################################
+# #(make _load_chamber_metadata !)
+# def _load_chamber_metadata(self,standard_data_df) -> None:
+#     '''
+#     Populates an json_dict with kinetic data with the following schema:
+#     {button_quant: {
         
-    #     return chamber_coords, luminance_data, conc_data, time_data
+#         1,1: {
+#             sum_chamber: {'values': [...],
+#                         'unit': 'RFU',
+#                         'is_quantity': True},
+#             std_chamber: {'values': [...],
+#                         'unit': 'RFU',
+#                         'is_quantity': True},
+#         },
+#         ...
+#         }}
+
+#     Parameters:
+#         standard_data_df (pd.DataFrame): Dataframe from standard curve
+
+#     Returns:
+#         None
+#     '''    
+#     unique_chambers = standard_data_df[['id','x_center_chamber', 'y_center_chamber', 'radius_chamber', 
+#         'xslice', 'yslice', 'indices']].drop_duplicates(subset=["indices"]).set_index("indices")
+#     self._update_file(Path("chamber_metadata"), unique_chambers.to_dict("index") )
+
+# def load_standard_data_from_file(self, standard_curve_data_path: str, standard_name: str, standard_type: str, standard_units: str) -> None:
+#     '''
+#     Populates an dict with standard curve data with the following schema, and saves to the .HTBAM file:
+#     {standard_run_#: {
+#         name: str,
+#         type: str,
+#         assays: {
+#             1: {
+#                 conc: float,
+#                 time:
+#                     {'values': [...],
+#                     'unit': 's',
+#                     'is_quantity': True},
+#                 chambers: {
+#                     1,1: {
+#                         sum_chamber: {'values': [...],
+#                                       'units': 'RFU',
+#                                       'is_quantity': True},
+#                         std_chamber: {'values': [...],
+#                                       'unit': 'RFU'}
+#                                       'is_quantity': True},
+#                     },
+#                     ...
+#                     }}}}
+
+#     Parameters:
+#         standard_curve_data_path (str): Path to standard curve data
+#         standard_name (str): Name of standard curve
+#         standard_type (str): Type of standard curve
+#         standard_units (str): Units of standard curve
+
+#     Returns:
+#             None
+#     '''
+#     #First, check if our standard_units is a valid unit of concentration:
+#     if self.ureg(standard_units).dimensionality != self.ureg.molar.dimensionality:
+#         raise ValueError(f"Units {standard_units} are not a valid unit of concentration.\nIs your capitalization correct?")
     
-    # def save_new_analysis(self, run_name, analysis_name, chamber_dict):
-    #     '''
-    #     Creates a new analysis in the database. 
-    #     Input:
-    #         analysis_name (str): the name of the analysis to be created.
-    #         run_name (str): the name of the run to be analyzed.
-    #         analysis_type (str): the type of analysis to be performed.
-    #         analysis_params (dict): a dictionary of parameters for the analysis.
-    #     Output:
-    #         None
-    #     '''
+#     standard_data_df = pd.read_csv(standard_curve_data_path)
+#     standard_data_df['indices'] = standard_data_df.x.astype('str') + ',' + standard_data_df.y.astype('str')
+#     i = 0    
+#     std_assay_dict = {}
+#     #TODO: this bad convention of column names will be phased out soon.
+#     for prod_conc, subset in standard_data_df.groupby("concentration_uM"):
+#         squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=['sum_chamber', 'std_chamber'])
+#         squeezed["time_s"] = pd.Series([[0]]*len(squeezed), index=squeezed.index) #this tomfoolery is used to create a list with a single value, 0, for the standard curve assays.
+        
+#         #turn prod_conc into a pint.Quantity:
+#         prod_conc = np.array(prod_conc) * self.ureg(standard_units)
+        
+#         #turn it into a pint.Quantity:
+#         time_quantity = squeezed.iloc[0]["time_s"] * self.ureg("s")
 
-    #     analysis_path = Path("runs") / run_name / 'analyses' / analysis_name
+#         #now, we need to properly format the data for each chamber:
+#         chambers_dict_unformatted = squeezed.drop(columns=["time_s", "indices"]).to_dict("index")
+#         chambers_dict = {}
+#         for chamber_coord, chamber_data in chambers_dict_unformatted.items():
+#             chambers_dict[chamber_coord]  = {}
+#             for key, value in chamber_data.items():
+#                 #convert to pint.Quantity:
+#                 chambers_dict[chamber_coord][key] = value * self.ureg("RFU")
 
-    #     #use get(path) to check if the analysis already exists:
-    #     if 'analyses' not in self.get(Path("runs") / run_name).keys():
-    #         self._update_file(Path("runs") / run_name / "analyses", {})
+#         #make dict for each assay
+#         std_assay_dict[i] = {
+#             "conc": prod_conc, #serialize using our custom _quantity_to_dict function
+#             "time": time_quantity, 
+#             "chambers": chambers_dict}
+        
+#         i += 1
 
-    #     #our analysis must have one entry for each chamber. Let's verify this:
-    #     chamber_coords = self.get_chamber_coords()
-    #     for chamber_coord in chamber_coords:
-    #         if chamber_coord not in chamber_dict.keys():
-    #             raise ValueError(f"Chamber {chamber_coord} is missing from the analysis data. \n \
-    #                                 Analysis must have one entry for each chamber.")
-
-    #     analysis_dict = {
-    #         "chambers": chamber_dict,
-    #     }
-
-    #     #write to file
-    #     analysis_dict = self._make_serializable_dict(analysis_dict)
-    #     self._update_file(analysis_path, analysis_dict)
+#     std_run_num = len([key for key in self.get(Path('runs')) if "standard_" in key])
+#     standard_data_dict = {
+#         "name": standard_name,
+#         "type": standard_type,
+#         "assays": std_assay_dict
+#         }
     
-
+#     #append to file
+#     standard_data_dict = self._make_serializable_dict(standard_data_dict) #convert all quantities to dicts so we can save to json
+#     self._update_file(Path("runs") / f"standard_{std_run_num}", standard_data_dict)
     
+#     #update chamber metadata
+#     self._load_chamber_metadata(standard_data_df)
+    
+# def load_kinetics_data_from_file(self, kinetic_data_path: str, kinetic_name: str, kinetic_type: str, kinetic_units: str) -> None:
+#     '''
+#     Populates an dict with kinetic data with the following schema, and saves to the .HTBAM file:
+#     {kinetics_run_#: {
+#         name: str,
+#         type: str,
+#         assays: {
+#             1: {
+#                 conc: float,
+#                 time: {'values': [...],
+#                         'unit': 's',
+#                         'is_quantity': True},,
+#                 chambers: {
+#                     1,1: {
+#                         sum_chamber: {'values': [...],
+#                                       'unit': 'RFU',
+#                                       'is_quantity': True},
+#                         std_chamber: {'values': [...],
+#                                       'unit': 'RFU'}
+#                                       'is_quantity': True},
+#                     },
+#                     ...
+#                     }}}}
 
-    # def export_json(self):
-    #     '''This writes the database to file, as a dict -> json'''
-    #     with open('db.json', 'w') as fp:
-    #         json.dump(self._json_dict, fp, indent=4)
+#     Parameters:
+#         kinetic_data_path (str): Path to kinetic data
+#         kinetic_name (str): Name of kinetic data
+#         kinetic_type (str): Type of kinetic data
+#         kinetic_units (str): Units of kinetic data
+
+#     Returns:
+#             None
+#     '''    
+
+#     kinetic_data_df = pd.read_csv(kinetic_data_path)
+#     kinetic_data_df['indices'] = kinetic_data_df.x.astype('str') + ',' + kinetic_data_df.y.astype('str')
+
+#     def parse_concentration(conc_str: str):
+#         '''
+#         Currently, we're storing substrate concentration as a string in the kinetics data.
+#         This will be changed in the future to store as a float + unit as a string. For now,
+#         we will parse jankily.
+#         '''
+#         print('Warning: parsing concentration from string')
+#         #first, remove the unit and everything following
+#         conc = conc_str.split(kinetic_units)[0]
+#         #concentration number uses underscore as decimal point. Here, we replace and convert to a float:
+#         conc = float(conc.replace("_", "."))
+#         return conc
+    
+#     i = 0    
+#     kin_dict = {}
+#     for sub_conc, subset in kinetic_data_df.groupby("series_index"):
+#         squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=["time_s",'sum_chamber', 'std_chamber'])
+        
+#         #turn sub_conc into a pint.Quantity:
+#         sub_conc = np.array(parse_concentration(sub_conc)) * self.ureg(kinetic_units)
+
+#         #turn time into a pint.Quantity:
+#         time_quantity = np.array(squeezed.iloc[0]["time_s"]) * self.ureg("s")
+
+#         #now, we need to properly format the data for each chamber:
+#         chambers_dict_unformatted = squeezed.drop(columns=["time_s", "indices"]).to_dict("index")
+#         chambers_dict = {}
+#         for chamber_coord, chamber_data in chambers_dict_unformatted.items():
+#             chambers_dict[chamber_coord]  = {}
+#             for key, value in chamber_data.items():
+#                 #convert to pint.Quantity:
+#                 chambers_dict[chamber_coord][key] = value * self.ureg("RFU")
+
+#         #make dict for each assay
+#         kin_dict[i] = {
+#             "conc": sub_conc, 
+#             "time": time_quantity,
+#             "chambers": chambers_dict}
+#         i += 1
+
+#     kinetics_run_num = len([key for key in self.get(Path('runs')) if "kinetics_" in key])
+#     kinetics_data_dict = {
+#         "name": kinetic_name,
+#         "type": kinetic_type,
+#         "assays": kin_dict
+#     }
+    
+#     #append to file
+#     kinetics_data_dict = self._make_serializable_dict(kinetics_data_dict) #convert all quantities to dicts so we can save to json
+#     self._update_file(Path("runs") / f"kinetics_{kinetics_run_num}", kinetics_data_dict)
+
+# def load_button_quant_data_from_file(self, kinetic_data_path: str) -> None:
+#     '''
+#     Populates an json_dict with kinetic data with the following schema:
+#     {button_quant: {
+        
+#         1,1: {
+#             sum_chamber: [...],
+#             std_chamber: [...]
+#         },
+#         ...
+#         }}
+
+#             Parameters:
+#                     None
+
+#             Returns:
+#                     None
+#     '''    
+#     kinetic_data_df = pd.read_csv(kinetic_data_path)
+#     kinetic_data_df['indices'] = kinetic_data_df.x.astype('str') + ',' + kinetic_data_df.y.astype('str')
+#     try:
+#         unique_buttons = kinetic_data_df[["summed_button_Button_Quant","summed_button_BGsub_Button_Quant",
+#         "std_button_Button_Quant", "indices"]].drop_duplicates(subset=["indices"]).set_index("indices")
+#     except KeyError:
+#         raise HtbamDBException("ButtonQuant columns not found in kinetic data.")
+        
+#     button_quant_dict = unique_buttons.to_dict("index")
+#     #convert to pint.Quantity:
+#     for chamber_coord, chamber_dict in button_quant_dict.items():
+#         for key, value in chamber_dict.items():
+#             button_quant_dict[chamber_coord][key] = np.array([value]) * self.ureg("RFU")
+
+
+#     button_quant_dict = self._make_serializable_dict(button_quant_dict) #convert all quantities to dicts so we can save to json
+#     self._update_file("button_quant", button_quant_dict)
+
+
+# ##########################################################################################
+# ############################## UTILITIES: ANALYSIS  ######################################
+# ##########################################################################################
+# def get_chamber_coords(self):
+#     '''
+#     Returns the chamber ids for a given run.
+#     Input:
+#         None
+#     Output:
+#         chamber_ids: an array of the chamber ids (in the format '1,1' ... '32,56')
+#             shape: (n_chambers,)
+#     '''
+#     chamber_coords = np.array(list(self.get('chamber_metadata').keys()))
+#     return chamber_coords
+
+# def get_chamber_names(self):
+#     '''
+#     Returns the chamber names for a given run.
+#     Input:
+#         None
+#     Output:
+#         chamber_names: an array of the chamber names (in the format 'ecADK'...)
+#             shape: (n_chambers,)
+#     '''
+#     metadata_dict = self.get('chamber_metadata')
+#     chamber_coords = self.get_chamber_coords() #this way chamber_coords and chamber_names are always the same order.
+#     chamber_names = np.array([metadata_dict[chamber_coord]['id'] for chamber_coord in chamber_coords])
+#     return chamber_names
+
+# def get_run_data(self, run_name):
+#     '''
+#     Returns the data from a given run as numpy arrays.
+#     Input: 
+#         run_name (str): the name of the run to be converted to numpy arrays.
+#     Output:
+#         chamber_ids: an array of the chamber ids (in the format '1,1' ... '32,56')
+#             shape: (n_chambers,)
+#         luminance_data: an array of the luminance data for each chamber
+#             shape: (n_time_points, n_chambers, n_assays)
+#         conc_data: an array of the concentration data for each chamber.
+#             shape: (n_assays,)
+#         time_data: an array of the time data for each time point.
+#             shape: (n_time_points, n_assays)
+#     '''
+#     #get data from this run as a dict:
+#     run_data = self.get(Path("runs") / run_name)
+#     #convert all serialized quantities to pint.Quantities:
+#     run_data = self._make_quantities_from_serialized_dict(run_data)
+
+#     #get chamber_coords from file:
+#     chamber_coords = np.array(list(self.get('chamber_metadata').keys()))
+#     luminance_data = None
+#     time_data = None
+#     conc_data = np.array([])
+
+#     #Each assay may have recorded a different # of time points.
+#     #First, we'll just check what the max # of time points is:
+#     max_time_points = 0
+#     for assay in run_data['assays'].keys():
+#         current_assay_time_points = len(run_data['assays'][assay]['time'])
+#         if current_assay_time_points > max_time_points:
+#             max_time_points = current_assay_time_points
+
+#     for assay in run_data['assays'].keys():
+#         #to make things easier later, we'll be sorting the datapoints by time value.
+#         #Get time data:
+#         current_time_array = run_data['assays'][assay]['time']
+#         current_time_array = current_time_array.astype(float) #so we can pad with NaNs
+#         #pad the array with NaNs if there are fewer time points than the max
+#         current_time_array = np.pad(current_time_array, (0, max_time_points - len(current_time_array)), 'constant', constant_values=np.nan)
+#         #sort, and capture sorting idxs:
+#         sorting_idxs = np.argsort(current_time_array)
+#         current_time_array = current_time_array[sorting_idxs]
+#         current_time_array = np.expand_dims(current_time_array, axis=1)
+#         #add to our dataset
+#         if time_data is None:
+#             time_data = current_time_array
+#         else:
+#             time_data = np.concatenate([time_data, current_time_array], axis=1)
+
+#         #Get luminance data:
+#         current_luminance_array = None
+#         for chamber_idx in chamber_coords:
+#             #collect from DB
+#             current_chamber_array = run_data['assays'][assay]['chambers'][chamber_idx]['sum_chamber']
+#             #set type to float:
+#             current_chamber_array = current_chamber_array.astype(float)
+#             #pad the array with NaNs if there are fewer time points than the max
+#             current_chamber_array = np.pad(current_chamber_array, (0, max_time_points - len(current_chamber_array)), 'constant', constant_values=np.nan)
+#             #sort by time:
+#             current_chamber_array = current_chamber_array[sorting_idxs]
+#             #add a dimension at the end:
+#             current_chamber_array = np.expand_dims(current_chamber_array, axis=1)
+
+#             if current_luminance_array is None:
+#                 current_luminance_array = current_chamber_array
+#             else:
+#                 current_luminance_array = np.concatenate([current_luminance_array, current_chamber_array], axis=1)
+#         #add a dimension at the end:
+#         current_luminance_array = np.expand_dims(current_luminance_array, axis=2)
+#         #add to our dataset
+#         if luminance_data is None:
+#             luminance_data = current_luminance_array
+#         else:
+#             luminance_data = np.concatenate([luminance_data, current_luminance_array], axis=2)
+        
+#         #Get concentration data:
+#         #collect from DB
+#         current_conc = run_data['assays'][assay]['conc']
+#         conc_data = np.append(conc_data, current_conc)
+
+#     #sort once more, by conc_data:
+#     sorting_idxs = np.argsort(conc_data)
+#     conc_data = conc_data[sorting_idxs]
+
+#     #sort luminance data by conc_data:
+#     luminance_data = luminance_data[:,:,sorting_idxs]
+    
+#     return chamber_coords, luminance_data, conc_data, time_data
+
+# def save_new_analysis(self, run_name, analysis_name, chamber_dict):
+#     '''
+#     Creates a new analysis in the database. 
+#     Input:
+#         analysis_name (str): the name of the analysis to be created.
+#         run_name (str): the name of the run to be analyzed.
+#         analysis_type (str): the type of analysis to be performed.
+#         analysis_params (dict): a dictionary of parameters for the analysis.
+#     Output:
+#         None
+#     '''
+
+#     analysis_path = Path("runs") / run_name / 'analyses' / analysis_name
+
+#     #use get(path) to check if the analysis already exists:
+#     if 'analyses' not in self.get(Path("runs") / run_name).keys():
+#         self._update_file(Path("runs") / run_name / "analyses", {})
+
+#     #our analysis must have one entry for each chamber. Let's verify this:
+#     chamber_coords = self.get_chamber_coords()
+#     for chamber_coord in chamber_coords:
+#         if chamber_coord not in chamber_dict.keys():
+#             raise ValueError(f"Chamber {chamber_coord} is missing from the analysis data. \n \
+#                                 Analysis must have one entry for each chamber.")
+
+#     analysis_dict = {
+#         "chambers": chamber_dict,
+#     }
+
+#     #write to file
+#     analysis_dict = self._make_serializable_dict(analysis_dict)
+#     self._update_file(analysis_path, analysis_dict)
+
+
+
+
+# def export_json(self):
+#     '''This writes the database to file, as a dict -> json'''
+#     with open('db.json', 'w') as fp:
+#         json.dump(self._json_dict, fp, indent=4)
