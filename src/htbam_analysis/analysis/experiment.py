@@ -1461,10 +1461,10 @@ class HTBAMExperiment:
         # fixed_sample_mm_dict = dict(sorted(fixed_sample_mm_dict.items()))
         
         
-        for name, values in sample_mm_dict.items():
-            old_name, values = values
+        for name, _ in sample_mm_dict.items():
+            #old_name, values = values
            
-            plot_chamber_mm(chamber_name_to_id_dict[old_name][0], axs[page_counter], title=name)
+            plot_chamber_mm(chamber_name_to_id_dict[name][0], axs[page_counter], title=name)
             if page_counter == 14:
                 plt.tight_layout()
                 #pdf.savefig(fig)
