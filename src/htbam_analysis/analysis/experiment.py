@@ -1359,8 +1359,8 @@ class HTBAMExperiment:
         filtered_initial_slopes = deepcopy(initial_rate_arr)
         for filter in filters: filtered_initial_slopes *= filter
 
-        # unsorted_sample_mm_dict = self._db_conn.get_sample_analysis_dict(run_name, 'mm_filtered')
-        # sample_mm_dict = dict()
+        sample_mm_dict = self._db_conn.get_sample_analysis_dict(run_name, 'mm_filtered')
+        #  = dict()
         # for k, v in unsorted_sample_mm_dict.items():
         #     sample_mm_dict[k.lower()] = v  
 
