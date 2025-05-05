@@ -15,6 +15,8 @@ from copy import deepcopy
 from scipy.optimize import curve_fit
 import re
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from pathlib import Path
 
 
 class HTBAMExperiment:
@@ -1327,6 +1329,166 @@ class HTBAMExperiment:
         ax.set_xlabel('Substrate')
         ax.set_ylabel(f'Initial Rate ({self.get_concentration_units(run_name)}/s)')
         plt.show()
+
+    def export_all_mm_curves(self, run_name: str,
+                        save_path: str,
+                        substrate_name: str,
+                        substrate_conc_unit: str,
+                        enzyme_conc_conversion: float = 1.0, 
+                        show_average_fit: bool = False,
+                        mm_model = None,
+                        background_subtraction: bool = False,
+                        ):
+
+        save_path = Path(save_path)
+
+        if mm_model is None:
+            # default model
+            def mm_model(x, v_max, K_m):
+                return v_max*x/(K_m + x)
+        elif show_average_fit:
+            raise ValueError("Cannot show average fit with custom model.")
+
+        enzyme_concentrations = deepcopy(self._run_data[run_name]["enzyme_concentration"])
+
+        initial_rates_dict = self._db_conn.get_analysis(run_name, 'bgsub_linear_regression' if background_subtraction else 'linear_regression', 'slopes')
+        initial_rate_arr = np.array(list(initial_rates_dict.values()))
+        chamber_idxs = list(initial_rates_dict.keys())
+      
+        filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
+        filtered_initial_slopes = deepcopy(initial_rate_arr)
+        for filter in filters: filtered_initial_slopes *= filter
+
+        sample_mm_dict = self._db_conn.get_sample_analysis_dict(run_name, 'mm_filtered')
+        #  = dict()
+        # for k, v in unsorted_sample_mm_dict.items():
+        #     sample_mm_dict[k.lower()] = v  
+
+        chamber_names_dict = self._db_conn.get_chamber_name_dict()
+        # chamber_names_dict = {k: v.lower() for k, v in uppercase_chamber_names_dict.items()}
+
+        chamber_name_to_id_dict = self._db_conn.get_chamber_name_to_id_dict()
+        # chamber_name_to_id_dict = {k.lower(): v for k, v in uppercase_chamber_name_to_id_dict.items()}
+        
+        # sort sample_mm_dict alphabetically
+        sample_mm_dict = dict(sorted(sample_mm_dict.items()))
+
+    
+        def plot_chamber_mm(chamber_id, ax, title):
+
+            #get the substrate concentrations that match with each initial rate:
+            substrate_concs = self._run_data[run_name]["conc_data"]
+
+            #find the name of the chamber:
+            chamber_name = chamber_names_dict[chamber_id]
+
+            
+            #first, find all chambers with this name:
+            #if there's no data, just skip!
+            if chamber_name not in sample_mm_dict.keys():
+                return ax
+            chamber_id_list = sample_mm_dict[chamber_name]['mm_replicates']
+            #convert to array indices:
+            chamber_id_list = [list(chamber_idxs).index(x) for x in chamber_id_list]
+
+            #get the initial rates for each chamber:
+            initial_slopes = deepcopy(filtered_initial_slopes[chamber_id_list,:])
+        
+            normed_initial_slopes = initial_slopes / (enzyme_concentrations[chamber_id_list][: , np.newaxis] * enzyme_conc_conversion)
+
+           
+            #get average
+            initial_slopes_avg = np.nanmean(normed_initial_slopes, axis=0)
+            #get error bars
+            initial_slopes_std = np.nanstd(normed_initial_slopes, axis=0)
+
+            x_data = substrate_concs
+            y_data = initial_slopes_avg
+
+            #plot with error bars:
+            ax.errorbar(x_data, y_data, yerr=initial_slopes_std,  ls="None", capsize=3, color='blue')
+            ax.scatter(x_data, y_data, color='blue', s=50)
+
+            avg_kcat = sample_mm_dict[chamber_name]['kcat']
+            std_kcat = sample_mm_dict[chamber_name]['kcat_std']
+            if show_average_fit:
+                x_linspace = np.linspace(np.nanmin(x_data), np.nanmax(x_data), 100)
+                ax.plot(x_linspace, mm_model(x_linspace, avg_kcat, sample_mm_dict[chamber_name]["K_m"]), color='blue')
+                ax.fill_between(x_linspace, mm_model(x_linspace, avg_kcat - std_kcat, sample_mm_dict[chamber_name]['K_m']),
+                                            mm_model(x_linspace, avg_kcat + std_kcat, sample_mm_dict[chamber_name]['K_m']),
+                                            color='blue', alpha=0.3)
+
+            
+            ax.text(0.2,0.15, ' $\overline{k_{cat}}$: ' + '{:.2f}'.format(avg_kcat) 
+                    + '$\pm$ {:.2f}'.format(std_kcat) + ' $s^{-1}$', transform=ax.transAxes, fontsize=8,fontfamily="Helvetica") 
+            ax.text(0.2,0.03, ' $\overline{K_M}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["K_m"]) 
+                    + '$\pm$ {:.2f}'.format(sample_mm_dict[chamber_name]["K_m_std"]) + ' ' + substrate_conc_unit, transform=ax.transAxes, fontsize=8,
+                    fontfamily="Helvetica")    
+            
+            
+
+            ax.set_title(title, fontsize=9, fontfamily="Helvetica")
+            ax.set_xlabel('$\it{[' + substrate_name + '] (' + substrate_conc_unit +')}$', fontfamily="Helvetica", fontsize=8, fontstyle="italic")
+            for tick in ax.xaxis.get_major_ticks():
+                tick.label.set_fontsize(8) 
+                tick.label.set_fontfamily("Helvetica")
+            for tick in ax.yaxis.get_major_ticks():
+                tick.label.set_fontsize(8) 
+                tick.label.set_fontfamily("Helvetica")
+            ax.set_ylabel('$v_0/[E] (s^{-1})$', fontfamily="Helvetica", fontsize=8, fontstyle="italic")
+            return ax
+        
+        #with PdfPages('/Users/duncanmuir/Desktop/mm_curves_new.pdf') as pdf:
+        page_counter = 0
+        page_num = 1
+        fig, axs = plt.subplots(5,3, figsize=(7.24, 10))
+        axs = axs.flatten()
+        #org_lookup['id'] = org_lookup['id'].str.lower()
+
+    
+        # fixed_sample_mm_dict = dict()
+        # for old_name, values in sample_mm_dict.items():
+        #     if old_name in org_lookup['org_name'].values:
+        #             new_name = old_name
+        #     elif old_name in org_lookup['id'].str.lower().values:
+        #         new_name = org_lookup.loc[(org_lookup['id'].str.lower() == old_name), 'org_name'].values[0]
+
+        #     else:
+        #         print("YIKES:", old_name) 
+        #     if new_name in org_swap_dict.keys():
+        #         new_name = org_swap_dict[new_name]
+        #     fixed_sample_mm_dict[new_name] = (old_name, values)
+        # fixed_sample_mm_dict = dict(sorted(fixed_sample_mm_dict.items()))
+        
+        
+        for name, _ in sample_mm_dict.items():
+            #old_name, values = values
+           
+            plot_chamber_mm(chamber_name_to_id_dict[name][0], axs[page_counter], title=name)
+            if page_counter == 14:
+                plt.tight_layout()
+                #pdf.savefig(fig)
+                plt.savefig(save_path / f"mm_curve_page_{page_num}.png", dpi=300)
+                plt.close(fig)
+                page_counter = 0
+                page_num += 1
+                fig, axs = plt.subplots(5,3, figsize=(7.24, 10))
+                axs = axs.flatten()
+                continue
+            page_counter += 1
+        plt.tight_layout()
+        plt.savefig(save_path / f"mm_curve_page_{page_num}.png", dpi=300)
+        plt.close(fig)
+            
+
+                
+            
+
+
+        
+
+    
+    
     ##############################
     #### Freiatas W.I.P. Code ####
     ##############################
