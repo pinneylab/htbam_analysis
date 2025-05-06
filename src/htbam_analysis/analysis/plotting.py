@@ -5,7 +5,7 @@ import tempfile
 import matplotlib.pyplot as plt
 import numpy as np
 
-def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
+def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None, x_axis_label=None, y_axis_label=None):
     ''' This function creates a Dash visualization of a chip, based on a certain Run (run_name)
         Inputs:
             plotting_var: a dictionary mapping chamber_id to the variable to be plotted for that chamber

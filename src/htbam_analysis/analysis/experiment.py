@@ -72,7 +72,7 @@ class HTBAMExperiment:
             results_dict = {'slope': slope, 'intercept': intercept, 'r_value': r_value, 'r2':r_value**2, 'p_value': p_value, 'std_err': std_err}
             self._db_conn.add_analysis(run_name, 'linear_regression', idx,results_dict)
 
-    def plot_standard_curve_chip(self, run_name: str):
+    def plot_standard_curve_chip(self, run_name: str, egfp_conc_units='uM'):
         #plotting variable: We'll plot by luminance. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
         slopes_to_plot = self._db_conn.get_analysis(run_name, 'linear_regression', 'slope')
         intercepts_to_plot = self._db_conn.get_analysis(run_name, 'linear_regression', 'intercept')
@@ -99,6 +99,10 @@ class HTBAMExperiment:
             b = intercept[data_index]
             #make a simple matplotlib plot
             ax.scatter(x_data, y_data)
+            # x label:
+            ax.set_xlabel(f'Concentration ({egfp_conc_units})')
+            # y label:
+            ax.set_ylabel('Luminance (RFU)')
             if not (np.isnan(m) or np.isnan(b)):
                 #return False, no_update, no_update
                 ax.plot(x_data, m*np.array(x_data) + b)
