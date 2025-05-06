@@ -1,22 +1,30 @@
-from typing import List, Tuple
+import csv
+import inspect
+import json
+import math
+import os
+import re
+from copy import deepcopy
+from pathlib import Path
+from typing import Callable, List, Optional, Tuple, Union
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import csv
-import json
-import os
 import scipy
+import seaborn as sns
+from matplotlib.backends.backend_pdf import PdfPages
+from scipy.optimize import curve_fit
+from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
+
 from htbam_db_api.htbam_db_api import AbstractHtbamDBAPI, HtbamDBException
 from htbam_analysis.analysis.plotting import plot_chip
-from sklearn.linear_model import LinearRegression
-import inspect
-import seaborn as sns
-from copy import deepcopy
-from scipy.optimize import curve_fit
-import re
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from pathlib import Path
+
+
+## Model defaults
+def default_ic50_model(x, r_max, r_min, ic50):
+    return r_min + (r_max-r_min)/(1+(x/ic50))
 
 
 class HTBAMExperiment:
@@ -53,13 +61,13 @@ class HTBAMExperiment:
         print(f"Standard curve data found for run \"{run_name}\" with:")
         luminance_shape = self._run_data[run_name]['luminance_data'].shape
         print(f"\t-- {luminance_shape[0]} time points.\n\t-- {luminance_shape[1]} chambers.\n\t-- {luminance_shape[2]} concentrations.")
-        
+
         if high_conc_idx is None:
             high_conc_idx = len(self._run_data[run_name]["conc_data"])
 
         print("\nFitting standard curve...")
         for i, idx in tqdm(list(enumerate(self._run_data[run_name]["chamber_idxs"]))):
-            slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(self._run_data[run_name]["conc_data"][low_conc_idx:high_conc_idx], 
+            slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(self._run_data[run_name]["conc_data"][low_conc_idx:high_conc_idx],
                                                                                  self._run_data[run_name]["luminance_data"][:,i][:,low_conc_idx:high_conc_idx])
             results_dict = {'slope': slope, 'intercept': intercept, 'r_value': r_value, 'r2':r_value**2, 'p_value': p_value, 'std_err': std_err}
             self._db_conn.add_analysis(run_name, 'linear_regression', idx,results_dict)
@@ -75,18 +83,18 @@ class HTBAMExperiment:
         # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
         def plot_chamber_slopes(chamber_id, ax):
             #parameters:
-    
+
             analysis_name = 'linear_regression'
-            
+
             #convert from 'x,y' to integer index in the array:
             data_index = list(self._run_data[run_name]["chamber_idxs"]).index(chamber_id)
             x_data = self._run_data[run_name]["conc_data"]
             y_data = self._run_data[run_name]["luminance_data"][:,data_index]
-        
+
             #get slope from the analysis:
             slope = np.array(list(slopes_to_plot.values()))
             intercept = np.array(list(intercepts_to_plot.values()))
-            
+
             m = slope[data_index]
             b = intercept[data_index]
             #make a simple matplotlib plot
@@ -97,8 +105,8 @@ class HTBAMExperiment:
             return ax
         plot_chip(slopes_to_plot, chamber_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
 
-    def fit_initial_rates(self, run_name: str, 
-                          standard_run_name: str, 
+    def fit_initial_rates(self, run_name: str,
+                          standard_run_name: str,
                           substrate_conc: float = None,
                           max_rxn_perc: int = 15,
                           starting_timepoint_index: int = 0,
@@ -113,9 +121,9 @@ class HTBAMExperiment:
         if run_name not in self._run_data.keys():
             print("Existing run data not found. Fetching from database.")
             chamber_idxs, luminance_data, conc_data, time_data = self._db_conn.get_run_assay_data(run_name)
-            self._run_data[run_name] = {'chamber_idxs': chamber_idxs, 
-                                        'luminance_data': luminance_data, 
-                                        'conc_data': conc_data, 
+            self._run_data[run_name] = {'chamber_idxs': chamber_idxs,
+                                        'luminance_data': luminance_data,
+                                        'conc_data': conc_data,
                                         'time_data': time_data}
 
         print(f"Activity data found for run \"{run_name}\" with:")
@@ -124,7 +132,7 @@ class HTBAMExperiment:
 
         if standard_run_name not in self._run_data.keys():
             raise ValueError(f"Standard curve data not found for run \"{standard_run_name}\". Please fit the standard curve first.")
-        
+
         print(f"Using standard curve data from run \"{standard_run_name}\" to convert luminance data to concentration data.")
 
         std_slopes = np.array(list(self._db_conn.get_analysis(standard_run_name, 'linear_regression', 'slope').values()))
@@ -138,7 +146,7 @@ class HTBAMExperiment:
 
         arr = np.empty((chamber_dim, conc_dim))
         arr[:] = np.nan
-            
+
         #make an array of initial slopes for each chamber: should be (#chambers , #concentrations) = (1792 x 11)
         # initial_slopes = arr.copy()
         # initial_slopes_R2 = arr.copy()
@@ -153,7 +161,7 @@ class HTBAMExperiment:
         #print(substrate_concs)
         product_thresholds = substrate_concs * max_rxn_perc / 100
         product_thresholds = product_thresholds[:, np.newaxis]
-        two_point_fits = 0 
+        two_point_fits = 0
         for i, chamber_idx in tqdm(list(enumerate(self._run_data[run_name]["chamber_idxs"]))):
 
             #use the kinetics package to calculate the slopes for this chamber at each substrate concentration.
@@ -161,13 +169,13 @@ class HTBAMExperiment:
 
             # which product concentration is below the threshold?
             zeroed_product_conc_array = deepcopy(product_conc_array)
-          
+
             zeroed_product_conc_array = zeroed_product_conc_array - zeroed_product_conc_array[:,starting_timepoint_index][:, np.newaxis]
-            
+
             rxn_threshold_mask = zeroed_product_conc_array < product_thresholds
-            
+
             time_allowed_mask = time_series < max_rxn_time
-            
+
             rxn_threshold_mask[:,:starting_timepoint_index] = 0
 
             rxn_threshold_mask = np.logical_and(rxn_threshold_mask, time_allowed_mask.T)
@@ -191,17 +199,17 @@ class HTBAMExperiment:
                     intercepts[j] = intercept
                     scores[j] = score
             results_dict = {'slopes': slopes, 'intercepts': intercepts, 'r_values': scores,  'mask': rxn_threshold_mask}
-            
+
             self._db_conn.add_analysis(run_name, 'linear_regression', chamber_idx, results_dict)
             # initial_slopes[i] = slopes
             # initial_slopes_intercepts[i] = intercepts
             # initial_slopes_R2[i] = scores
             # reg_idx_arr[i] = rxn_threshold_mask
         print(f'{two_point_fits} reactions had less than 2 points for fitting')
-    
+
     def plot_progress_curves(self, run_name: str, chamber_idx: str, export_path: str = None):
-        
-        idx = list(self._run_data[run_name]["chamber_idxs"]).index(chamber_idx) 
+
+        idx = list(self._run_data[run_name]["chamber_idxs"]).index(chamber_idx)
         print(idx)
         name = self._db_conn.get_chamber_name_dict()[chamber_idx]
         prod_conc = self._run_data[run_name]["product_concentration"][:,idx,:].T
@@ -221,7 +229,7 @@ class HTBAMExperiment:
         ax.set_xlabel('Time (s)')
         ax.set_ylabel('Product Concentration (uM)')
 
-        
+
     def subtract_background_rate(self, run_name: str, background_pattern: str):
         chamber_name_to_id_dict = self._db_conn.get_chamber_name_to_id_dict()
         names = []
@@ -254,7 +262,7 @@ class HTBAMExperiment:
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
 
         initial_rate_intercepts_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'intercepts')
-        initial_rate_masks_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'mask') 
+        initial_rate_masks_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'mask')
         intial_rate_arr = np.array(list(initial_rates_dict.values()))
         initial_rate_intercepts_arr = np.array(list(initial_rate_intercepts_dict.values()))
         initial_rate_masks_arr = np.array(list(initial_rate_masks_dict.values()))
@@ -269,19 +277,19 @@ class HTBAMExperiment:
         # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
         def plot_chamber_initial_rates(chamber_id, ax, time_to_plot=time_to_plot):
             #N.B. Every so often, slope and line colors don't match up. Not sure why.
-            
+
             #convert from 'x,y' to integer index in the array:
             data_index = list(self._run_data[run_name]["chamber_idxs"]).index(chamber_id)
             x_data = self._run_data[run_name]["time_data"][:,0]
             y_data = self._run_data[run_name]["product_concentration"][:,data_index,:].T
-            
+
             #plot only first X% of time:
             max_time = np.nanmax(x_data)
             time_to_plot = max_time*time_to_plot
             time_idxs_to_plot = x_data < time_to_plot
             x_data = x_data[time_idxs_to_plot]
             y_data = y_data[:, time_idxs_to_plot]
-            
+
             # TODO: add option to subtract zeroth point(s) from all points
             #get slope from the analysis:
             current_chamber_slopes = intial_rate_arr[data_index,:]
@@ -289,11 +297,11 @@ class HTBAMExperiment:
             current_chamber_intercepts = initial_rate_intercepts_arr[data_index,:]
             # get regressed point mask:
             current_chamber_reg_mask = initial_rate_masks_arr[data_index,:][:,:len(x_data)]
-            
+
             colors = sns.color_palette('husl', n_colors=y_data.shape[0])
 
             for i in range(y_data.shape[0]): #over each concentration:
-                
+
                 if subtract_zeroth_point:
                     try:
                         ax.scatter(x_data, y_data[i,:] - y_data[i,0], color=colors[i], alpha=0.3)
@@ -328,22 +336,22 @@ class HTBAMExperiment:
         self._run_data[run_name]["enzyme_concentration"] = button_quant_no_background / egfp_slope    #in units of EGFP_SLOPE_CONC_UNITS
 
     def filter_initial_rates(self,
-                            kinetic_run_name: str, 
+                            kinetic_run_name: str,
                             standard_run_name: str,
                             standard_curve_r2_cutoff: float = 0.98,
                             expression_threshold: float = 1.0,
-                            initial_rate_R2_threshold: float = 0.0, 
+                            initial_rate_R2_threshold: float = 0.0,
                             positive_initial_slope_filter: bool = True,
                             multiple_exposures: bool = False,
                             background_subtraction: bool = False,):
-        
+
         initial_slopes = np.array(list(self._db_conn.get_analysis(kinetic_run_name, 'bgsub_linear_regression' if background_subtraction else 'linear_regression', 'slopes').values()))
         enzyme_concentration = self._run_data[kinetic_run_name]["enzyme_concentration"]
         chamber_count = len(self._run_data[kinetic_run_name]["chamber_idxs"])
         conc_count = len(self._run_data[kinetic_run_name]["conc_data"])
         standard_r2_values = np.array(list(self._db_conn.get_analysis(standard_run_name, 'linear_regression', 'r2').values()))
         initial_rate_r2_values = np.array(list(self._db_conn.get_analysis(kinetic_run_name, 'linear_regression', 'r_values').values()))
-        
+
         #print(initial_slopes)
         ### Make filters ###
         filters = []
@@ -366,7 +374,7 @@ class HTBAMExperiment:
         # overwrite all chambers (rows) with enzyme expression below the threshold with NaNs:
         #Double check the expression units match the EGFP units:
         #assert expression_threshhold_units == EGFP_SLOPE_CONC_UNITS, 'Error, enzyme expression and EGFP standard curve units do not match!'
-        
+
         filter_enzyme_expression = np.ones_like(initial_slopes)
         _count = 0
         for i in range(len(self._run_data[kinetic_run_name]["chamber_idxs"])):
@@ -377,13 +385,13 @@ class HTBAMExperiment:
         filters.append(filter_enzyme_expression)
         filter_names.append('filter_enzyme_expression')
         filter_values.append(expression_threshold)
-        #TODO: track units! 
+        #TODO: track units!
 
         # INITIAL RATE FIT FILTER #
         # overwrite just the assays per chamber (single values) with initial rate fit R^2 values below the threshold with NaNs:
         filter_initial_rate_R2 = np.ones_like(initial_slopes)
         _count = 0
-        for i in range(len(self._run_data[kinetic_run_name]["chamber_idxs"])):            
+        for i in range(len(self._run_data[kinetic_run_name]["chamber_idxs"])):
             _chamber_count = 0
             for j in range(conc_count):
                 if initial_rate_r2_values[i,j] < initial_rate_R2_threshold:
@@ -429,7 +437,7 @@ class HTBAMExperiment:
         assay_dict.update({filter_names[i]: filter_values[i] for i in range(len(filter_names))})
 
         # #initialize the dictionary
-       
+
         assay_data = {}
         for i in range(conc_count):
             assay_data[i] = {
@@ -451,7 +459,7 @@ class HTBAMExperiment:
 
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
         initial_rate_intercepts_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'intercepts')
-        initial_rate_masks_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'mask') 
+        initial_rate_masks_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'mask')
         initial_rate_arr = np.array(list(initial_rates_dict.values()))
         initial_rate_intercepts_arr = np.array(list(initial_rate_intercepts_dict.values()))
         initial_rate_masks_arr = np.array(list(initial_rate_masks_dict.values()))
@@ -460,7 +468,7 @@ class HTBAMExperiment:
         filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
         filtered_initial_slopes = deepcopy(initial_rate_arr)
         for filter in filters: filtered_initial_slopes *= filter
-        
+
         chamber_names_dict = self._db_conn.get_chamber_name_dict()
 
         #Let's plot as before:
@@ -477,34 +485,34 @@ class HTBAMExperiment:
         def plot_chamber_filtered_initial_rates(chamber_id, ax, time_to_plot=time_to_plot):
             #N.B. Every so often, slope and line colors don't match up. Not sure why.
             #parameters: what amount of total time to plot? First 20%?
-        
+
             #convert from 'x,y' to integer index in the array:
             data_index = list(self._run_data[run_name]["chamber_idxs"]).index(chamber_id)
             x_data = self._run_data[run_name]["time_data"][:,0]
             y_data = self._run_data[run_name]["product_concentration"][:,data_index,:].T
-            
+
             #plot only first X% of time:
             max_time = np.nanmax(x_data)
             time_to_plot = max_time*time_to_plot
             time_idxs_to_plot = x_data < time_to_plot
             x_data = x_data[time_idxs_to_plot]
             y_data = y_data[:, time_idxs_to_plot]
-            
+
             #get slope from the analysis:
             current_chamber_slopes = filtered_initial_slopes[data_index,:]
             #calculate y-intercept by making sure it intersects first point:
             current_chamber_intercepts = initial_rate_intercepts_arr[data_index,:]
             # get regressed point mask:
             current_chamber_reg_mask = initial_rate_masks_arr[data_index,:][:,:len(x_data)]
-            
+
             colors = sns.color_palette('husl', n_colors=y_data.shape[0])
 
             #print(y_data.shape[0])
             for i in range(y_data.shape[0]): #over each concentration:
-                
+
                 ax.scatter(x_data, y_data[i,:], color=colors[i], alpha=0.3)
                 ax.scatter(x_data[current_chamber_reg_mask[i]], y_data[i, current_chamber_reg_mask[i]], color=colors[i], alpha=1, s=50)
-                
+
                 m = current_chamber_slopes[i]
                 b = current_chamber_intercepts[i]
                 if not (np.isnan(m) or np.isnan(b)):
@@ -512,11 +520,11 @@ class HTBAMExperiment:
                     ax.plot(x_data, m*np.array(x_data) + b, color=colors[i])
             return ax
 
-            
+
 
         ### PLOT THE CHIP: now, we plot
         plot_chip(filtered_initial_rates_to_plot, chamber_names_dict, graphing_function=plot_chamber_filtered_initial_rates, title='Kinetics: Filtered Initial Rates (Max)')
-        print('{}/1792 wells pass our filters.'.format( 
+        print('{}/1792 wells pass our filters.'.format(
             np.sum([np.any(~np.isnan(filtered_initial_slopes[i,:])) for i in range(len(self._run_data[run_name]["chamber_idxs"]))]) ) )
 
     def combine_filtered_assays(self, run_names_to_combine: List[str]):
@@ -530,28 +538,28 @@ class HTBAMExperiment:
                 self._run_data[new_run_name]["conc_data"] = np.concatenate((self._run_data[new_run_name]["conc_data"], self._run_data[run_name]["conc_data"]))
 
         self._run_data[new_run_name]["enzyme_concentration"] = self._run_data[run_names_to_combine[0]]["enzyme_concentration"]
-        self._run_data[new_run_name]["chamber_idxs"] = self._run_data[run_names_to_combine[0]]["chamber_idxs"] 
+        self._run_data[new_run_name]["chamber_idxs"] = self._run_data[run_names_to_combine[0]]["chamber_idxs"]
         print(f"New run \"{new_run_name}\" created by combining runs {run_names_to_combine}.")
 
     def remove_run(self, run_name: str):
         if run_name in self._run_data.keys():
             del self._run_data[run_name]
         self._db_conn.remove_run(run_name)
-        
+
     def fit_ic50s(self, run_name: str, inhibition_model = None):
 
         if inhibition_model is None:
             # default model
             def inhibition_model(x, r_max, r_min, ic50):
                 return r_min + (r_max-r_min)/(1+(x/ic50))
-        
+
         arg_list = str(inspect.signature(inhibition_model)).strip("()").replace(" ", "").split(",")
 
         # get data
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
         initial_rate_arr = np.array(list(initial_rates_dict.values()))
         chamber_idxs = list(initial_rates_dict.keys())
-      
+
         filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
         filtered_initial_slopes = deepcopy(initial_rate_arr)
         for filter in filters: filtered_initial_slopes *= filter
@@ -576,7 +584,7 @@ class HTBAMExperiment:
 
             #get indices of non-nan values:
             non_nan_idxs = np.where(~np.isnan(current_slopes))[0]
-            
+
             current_slopes = current_slopes[non_nan_idxs]
             current_concs = self._run_data[run_name]["conc_data"][non_nan_idxs]
 
@@ -592,17 +600,17 @@ class HTBAMExperiment:
             max_normed_slopes = current_slopes / np.nanmax(current_slopes)
             #kinetics.fit_and_plot_micheaelis_menten(current_slopes, current_slopes, current_concs, enzyme_concentration_converted_units[i], 'uM', 'MM for first chamber!')
             #K_i, std_err = kinetics.fit_inhibition_constant(max_normed_slopes, max_normed_slopes, current_concs, enzyme_concentration_converted_units[i], 'uM', 'MM for first chamber!')
-            
+
             try:
                 p_opt, p_cov = curve_fit(inhibition_model, current_concs, max_normed_slopes)
                 param_dict = {i:j for i,j in zip(arg_list[1:], p_opt)}
                 if "ic50" not in param_dict.keys():
                     raise ValueError("Inhibition model must have an 'ic50' parameter.")
-                
+
                 ic50 = param_dict["ic50"]
                 fit_err = np.sqrt(np.diag(p_cov))
                 param_error_dict = {i:j for i,j in zip(arg_list[1:], fit_err)}
-            
+
                 ic50_err = param_error_dict["ic50"]
 
                 ic50_array = np.append(ic50_array, ic50)
@@ -617,17 +625,17 @@ class HTBAMExperiment:
                 _count += 1
 
 
-            
+
         # chamber_idxs, luminance_data, conc_data, time_data
 
         for i, chamber_idx in enumerate(chamber_idxs):
-            self._db_conn.add_analysis(run_name, 'ic50_raw', chamber_idx,  {'ic50': ic50_array[i], 
+            self._db_conn.add_analysis(run_name, 'ic50_raw', chamber_idx,  {'ic50': ic50_array[i],
                                                                             'ic50_error': ic50_error_array[i],
                                                                             'fit_params': fit_params[i],
                                                                             'fit_params_errs': fit_params_errs[i]} )
         print(f'{_count} chambers had fewer than 3 slopes and were not fit.')
 
-    def filter_ic50s(self, 
+    def filter_ic50s(self,
                      run_name,
                      z_score_threshold_ic50 = 1.5,
                      z_score_threshold_expression = 1.5,
@@ -637,7 +645,7 @@ class HTBAMExperiment:
         enzyme_concentration = self._run_data[run_name]["enzyme_concentration"]
 
         #Get chamber ids from metadata:
-       
+
         #Get chamber ids from metadata:
         chamber_names_dict = self._db_conn.get_chamber_name_to_id_dict()
 
@@ -652,9 +660,9 @@ class HTBAMExperiment:
         # enzyme_concentration_zscores = np.array([])
 
         export_list1=[]
-        #For each sample, 
+        #For each sample,
         for name, ids in chamber_names_dict.items():
-            
+
 
             ### GATHER MM PARAMETERS OF REPLICATES FOR EACH SAMPLE: ###
             #get indices of idxs in chamber_idxs:
@@ -676,7 +684,7 @@ class HTBAMExperiment:
             ic50_zscore = (ic50s - np.nanmean(ic50s))/np.nanstd(ic50s)
 
             #also, get z-score of enzyme expression for each well:
-            enzyme_concentration_zscore = (enzyme_concentration[idxs] - np.nanmean(enzyme_concentration[idxs]))/np.nanstd(enzyme_concentration[idxs]) #in units of 'substrate_conc_unit' 
+            enzyme_concentration_zscore = (enzyme_concentration[idxs] - np.nanmean(enzyme_concentration[idxs]))/np.nanstd(enzyme_concentration[idxs]) #in units of 'substrate_conc_unit'
 
             #First, for enzyme expression outliers, set the value to NaN to be filtered in the final step:
             ic50s[np.abs(enzyme_concentration_zscore) > z_score_threshold_expression] = np.nan
@@ -694,12 +702,12 @@ class HTBAMExperiment:
             if len(ic50s) < 3:
                 print('Not enough replicates for sample {}. Skipping.'.format(name))
                 continue
-            
+
             #get average values:
             sample_names = np.append(sample_names, name)
             sample_ic50 = np.append(sample_ic50, np.mean(ic50s))
             sample_ic50_error = np.append(sample_ic50_error,np.std(ic50s))
-            
+
             #keep track of replicates:
             sample_ic50_replicates.append(ic50_replicates)
 
@@ -710,12 +718,12 @@ class HTBAMExperiment:
                     temp_list1.append(ic50)
                 export_list1.append(temp_list1)
 
-        if save_intermediate_data:   
+        if save_intermediate_data:
             df2 = pd.DataFrame(export_list1)
-            df2.to_csv('ic50_file_intermediate.csv')      
+            df2.to_csv('ic50_file_intermediate.csv')
         for i, sample_name in enumerate(sample_names):
             self._db_conn.add_sample_analysis(run_name, 'ic50_filtered', sample_name, {'ic50': sample_ic50[i], 'ic50_error': sample_ic50_error[i], 'ic50_replicates': sample_ic50_replicates[i]})
-          
+
         print('Average number of replicates per sample post-filtering: {}'.format(int(np.round(np.mean([len(i) for i in sample_ic50_replicates]), 0))))
 
 
@@ -726,14 +734,14 @@ class HTBAMExperiment:
             # default model
             def mm_model(x, v_max, K_m):
                 return v_max*x/(K_m + x)
-        
+
         arg_list = str(inspect.signature(mm_model)).strip("()").replace(" ", "").split(",")
 
         # get data
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'bgsub_linear_regression' if background_subtraction else 'linear_regression', 'slopes')
         initial_rate_arr = np.array(list(initial_rates_dict.values()))
         chamber_idxs = list(initial_rates_dict.keys())
-      
+
         filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
         filtered_initial_slopes = deepcopy(initial_rate_arr)
         for filter in filters: filtered_initial_slopes *= filter
@@ -760,7 +768,7 @@ class HTBAMExperiment:
 
             #get indices of non-nan values:
             non_nan_idxs = np.where(~np.isnan(current_slopes))[0]
-            
+
             current_slopes = current_slopes[non_nan_idxs]
             current_concs = self._run_data[run_name]["conc_data"][non_nan_idxs]
 
@@ -781,27 +789,27 @@ class HTBAMExperiment:
 
             if ("v_max" not in param_dict.keys()) or ("K_m" not in param_dict.keys()):
                 raise ValueError("MM model must have 'v_max' and 'K_m' parameters.")
-            
+
             v_max = param_dict["v_max"]
             fit_err = np.sqrt(np.diag(p_cov))
             param_error_dict = {i:j for i,j in zip(arg_list[1:], fit_err)}
 
-          
+
             kcat_array = np.append(kcat_array, v_max/ (enzyme_concentrations[i] * enzyme_conc_conversion))
-            
+
             Km_array = np.append(Km_array, param_dict["K_m"])
             fit_params.append(param_dict)
             fit_params_errs.append(param_error_dict)
         # chamber_idxs, luminance_data, conc_data, time_data
 
         for i, chamber_idx in enumerate(chamber_idxs):
-            self._db_conn.add_analysis(run_name, 'mm_raw', chamber_idx,  {'kcat': kcat_array[i], 
+            self._db_conn.add_analysis(run_name, 'mm_raw', chamber_idx,  {'kcat': kcat_array[i],
                                                                             'K_m': Km_array[i],
                                                                             'fit_params': fit_params[i],
                                                                             'fit_params_errs': fit_params_errs[i]} )
         print(f'{_count} chambers had fewer than 5 slopes and were not fit.')
 
-    def filter_mm(self, 
+    def filter_mm(self,
                     run_name,
                     z_score_threshold_mm = 1.5,
                     z_score_threshold_expression = 1.5,
@@ -816,7 +824,7 @@ class HTBAMExperiment:
         kcat_array = np.array(list(self._db_conn.get_analysis(run_name, 'mm_raw', 'kcat').values()))
         Km_array = np.array(list(self._db_conn.get_analysis(run_name, 'mm_raw', 'K_m').values()))
         enzyme_concentration = self._run_data[run_name]["enzyme_concentration"]
-       
+
         #Get chamber ids from metadata:
         chamber_names_dict = self._db_conn.get_chamber_name_to_id_dict()
 
@@ -831,11 +839,11 @@ class HTBAMExperiment:
         export_list1=[]
 
         conc_data = self._run_data[run_name]["conc_data"]
-        
-        #For each sample, 
+
+        #For each sample,
         for name, ids in chamber_names_dict.items():
-            
-            
+
+
 
             ### GATHER MM PARAMETERS OF REPLICATES FOR EACH SAMPLE: ###
             #get indices of idxs in chamber_idxs:
@@ -858,42 +866,42 @@ class HTBAMExperiment:
             kcat_zscore = (kcats - np.nanmean(kcats))/np.nanstd(kcats)
             K_m_zscore = (K_ms - np.nanmean(K_ms))/np.nanstd(K_ms)
 
-    
+
 
             #also, get z-score of enzyme expression for each well:
-            enzyme_concentration_zscore = (enzyme_concentration[idxs] - np.nanmean(enzyme_concentration[idxs]))/np.nanstd(enzyme_concentration[idxs]) #in units of 'substrate_conc_unit' 
+            enzyme_concentration_zscore = (enzyme_concentration[idxs] - np.nanmean(enzyme_concentration[idxs]))/np.nanstd(enzyme_concentration[idxs]) #in units of 'substrate_conc_unit'
 
             z_score_mask = np.logical_and(np.abs(enzyme_concentration_zscore) < z_score_threshold_expression, np.abs(kcat_zscore) < z_score_threshold_mm, np.abs(K_m_zscore) < z_score_threshold_mm)
-            
+
             # Km ceiling mask
             z_score_mask = np.logical_and(z_score_mask, K_ms < (km_fold_over_substrate * max(conc_data)))
-          
+
 
             #First, for enzyme expression outliers, set the value to NaN to be filtered in the final step:
             kcats[~z_score_mask] = np.nan
             K_ms[~z_score_mask] = np.nan
             mm_replicates[~z_score_mask] = np.nan
-           
+
 
             #remove nan values from all (nan values are due to both no experimental data, and z-score filtering)
             nan_mask = np.logical_and(~np.isnan(kcats), ~np.isnan(K_ms))
             kcats = kcats[nan_mask]
             K_ms = K_ms[nan_mask]
             mm_replicates = mm_replicates[nan_mask]
-          
+
 
 
             if len(kcats) < 3:
                 print('Not enough replicates for sample {}. Skipping.'.format(name))
                 continue
-            
+
             #get average values:
             sample_names = np.append(sample_names, name)
             sample_kcat = np.append(sample_kcat, np.mean(kcats))
             sample_kcat_std = np.append(sample_kcat_std, np.std(kcats))
             sample_K_m = np.append(sample_K_m, np.mean(K_ms))
             sample_K_m_std = np.append(sample_K_m_std, np.std(K_ms))
-            
+
             #keep track of replicates:
             sample_mm_replicates.append(mm_replicates)
 
@@ -904,24 +912,159 @@ class HTBAMExperiment:
                     temp_list1.append(kcat)
                 export_list1.append(temp_list1)
 
-        if save_intermediate_data:   
+        if save_intermediate_data:
             df2 = pd.DataFrame(export_list1)
-            df2.to_csv('mm_file_intermediate.csv')      
+            df2.to_csv('mm_file_intermediate.csv')
         for i, sample_name in enumerate(sample_names):
-          
+
             self._db_conn.add_sample_analysis(run_name, 'mm_filtered', sample_name, {'kcat': sample_kcat[i], 'kcat_std': sample_kcat_std[i],
                                                                                      'K_m': sample_K_m[i] , 'K_m_std': sample_K_m_std[i],
                                                                                      'mm_replicates': sample_mm_replicates[i]})
-          
+
         print('Average number of replicates per sample post-filtering: {}'.format(int(np.round(np.mean([len(i) for i in sample_mm_replicates]), 0))))
 
+    def fit_model(
+        self,
+        *,
+        run_name: str,
+        model_type: str,
+        target_params: List[str],
+        target_param_errors: Optional[List[str]] = None,
+        model_fn: Optional[Callable] = None,
+        independent_var: Union[str, Tuple[str, str]] = 'concentration',
+        dependent_var: Union[str, Tuple[str, str]] = ('filtered_initial_rates', 'slopes'),
+    ):
+        if target_param_errors is None:
+            target_param_arrays = []
+
+        model_defaults = {
+            'ic50': default_ic50_model
+        }
+        assert model_type in model_defaults, (f"we currently don't support {model_type} fitting, "
+                                              f"available fits are {model_defaults.keys()}")
+        if model_fn is None:
+            model_fn = model_defaults[model_type]
+
+        arg_list = str(inspect.signature(model_fn)).strip("()").replace(" ", "").split(",")
+        for p in target_params:
+            assert p in arg_list, f"model fn does not have param {p}"
+        for p in target_param_errors:
+            assert p in arg_list, f"model fn does not have param {p} to compute error of"
+
+        # get data
+        chamber_idxs, luminance_data, conc_data, _ = self._db_conn.get_run_assay_data(run_name)
+        run_assay_data = {'chamber_idxs': chamber_idxs, 'luminance': luminance_data, 'concentration': conc_data}
+        if isinstance(independent_var, str):
+            indep_var_arr = run_assay_data[independent_var]
+        else:
+            indep_var_dict = self._db_conn.get_filtered_analysis(run_name, *independent_var)
+            indep_var_arr = np.array(list(indep_var_dict.values()))
+        if isinstance(dependent_var, str):
+            dep_var_arr = run_assay_data[dependent_var]
+        else:
+            dep_var_dict = self._db_conn.get_filtered_analysis(run_name, *dependent_var)
+            dep_var_arr = np.array(list(dep_var_dict.values()))
+
+        filters = self._db_conn.get_filters(run_name, dependent_var[0])
+        filtered_dep_var_arr = math.prod(filters) * dep_var_arr
+
+        # Calculate the model params for each chamber.
+        target_param_arrays = {
+            p: np.array([])
+            for p in target_params
+        }
+        target_param_error_arrays = {
+            p: np.array([])
+            for p in target_param_errors
+        }
+        fit_params = []
+        fit_params_errs = []
+        _count = 0
+        for i in range(len(chamber_idxs)):
+            current_dep_var_arr = filtered_dep_var_arr[i, :]
+
+            if np.all(np.isnan(current_dep_var_arr)) or np.all(current_dep_var_arr == 0):
+                #print('Chamber {} has no slopes!'.format(chamber_idxs[i]))
+                for p in target_params:
+                    target_param_arrays[p] = np.append(target_param_arrays[p], np.nan)
+                for p in target_param_errors:
+                    target_param_error_arrays[p] = np.append(target_param_error_arrays[p], np.nan)
+                fit_params.append(dict(zip(arg_list[1:], [np.nan]*len(arg_list[1:]))))
+                fit_params_errs.append(dict(zip(arg_list[1:], [np.nan]*len(arg_list[1:]))))
+                _count += 1
+                continue
+
+            #get indices of non-nan values:
+            non_nan_idxs = np.where(~np.isnan(current_dep_var_arr))[0]
+
+            current_dep_var_arr = current_dep_var_arr[non_nan_idxs]
+            current_indep_var_arr = indep_var_arr[non_nan_idxs]
+
+            if len(current_dep_var_arr) < 3:
+                #print('Chamber {} has fewer than 3 slopes!'.format(chamber_idxs[i]))
+                for p in target_params:
+                    target_param_arrays[p] = np.append(target_param_arrays[p], np.nan)
+                for p in target_param_errors:
+                    target_param_error_arrays[p] = np.append(target_param_error_arrays[p], np.nan)
+                fit_params.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                fit_params_errs.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
+                _count += 1
+                continue
+
+            # max_normed_slopes = current_slopes / np.nanmax(current_slopes)
+
+            try:
+                p_opt, p_cov = curve_fit(model_fn, current_indep_var_arr, current_dep_var_arr)
+                param_dict = dict(zip(arg_list[1:], p_opt))
+                fit_err = np.sqrt(np.diag(p_cov))
+                param_error_dict = dict(zip(arg_list[1:], fit_err))
+                for p in target_params:
+                    target_param_arrays[p] = np.append(target_param_arrays[p], param_dict[p])
+                for p in target_param_errors:
+                    target_param_error_arrays[p] = np.append(target_param_error_arrays[p], param_error_dict[p])
+                fit_params.append(param_dict)
+                fit_params_errs.append(param_error_dict)
+            except RuntimeError:
+                for p in target_params:
+                    target_param_arrays[p] = np.append(target_param_arrays[p], np.nan)
+                for p in target_param_errors:
+                    target_param_error_arrays[p] = np.append(target_param_error_arrays[p], np.nan)
+                fit_params.append(dict(zip(arg_list[1:], [np.nan]*len(arg_list[1:]))))
+                fit_params_errs.append(dict(zip(arg_list[1:], [np.nan]*len(arg_list[1:]))))
+                _count += 1
+
+        # chamber_idxs, luminance_data, conc_data, time_data
+
+        for i, chamber_idx in enumerate(chamber_idxs):
+            analysis = {
+                'fit_params': fit_params[i],
+                'fit_params_errs': fit_params_errs[i]
+            }
+            analysis.update({
+                p: target_param_arrays[p][i]
+                for p in target_params
+            })
+            analysis.update({
+                f"{p}_error": target_param_error_arrays[p][i]
+                for p in target_param_errors
+            })
+
+            self._db_conn.add_analysis(
+                run_name,
+                f'{model_type}_raw',
+                chamber_idx,
+                analysis
+            )
+        print(f'{_count} chambers had fewer than 3 slopes and were not fit.')
+
+
     def plot_filtered_ic50(self, run_name: str, inhibition_model = None, show_average_fit: bool = False):
-        
+
         if inhibition_model is None:
             # default model
             def inhibition_model(x, r_max, r_min, ic50):
                 return r_min + (r_max-r_min)/(1+(x/ic50))
-            
+
         #first, fill it with NaNs as a placeholder:
         ic50_to_plot = {chamber_idx: np.nan for chamber_idx in self._run_data[run_name]["chamber_idxs"]}
 
@@ -930,7 +1073,7 @@ class HTBAMExperiment:
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
         initial_rate_arr = np.array(list(initial_rates_dict.values()))
         chamber_idxs = list(initial_rates_dict.keys())
-      
+
         filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
         filtered_initial_slopes = deepcopy(initial_rate_arr)
         for filter in filters: filtered_initial_slopes *= filter
@@ -940,7 +1083,7 @@ class HTBAMExperiment:
             for chamber_idx in chamber_name_to_id_dict[name]:
 
                 ic50_to_plot[chamber_idx] = values['ic50']
-        
+
         chamber_names_dict = self._db_conn.get_chamber_name_dict()
 
         #plotting function: We'll generate an MM subplot for each chamber.
@@ -963,7 +1106,7 @@ class HTBAMExperiment:
 
             #get the initial rates for each chamber:
             initial_slopes = deepcopy(filtered_initial_slopes[chamber_id_list,:])
-        
+
             normed_initial_slopes = initial_slopes / np.nanmax(initial_slopes, axis=1)[: , np.newaxis]
 
             #get average
@@ -973,7 +1116,7 @@ class HTBAMExperiment:
 
             x_data = substrate_concs
             y_data = initial_slopes_avg
-           
+
             #plot with error bars:
             ax.errorbar(x_data, y_data, yerr=initial_slopes_std,  ls="None", capsize=3, color='orange')
             ax.scatter(x_data, y_data, color='orange', s=100)
@@ -988,7 +1131,7 @@ class HTBAMExperiment:
                 ax.fill_between(x_logspace, inhibition_model(x_logspace, r_max=r_max_avg, r_min=r_min_avg, ic50=sample_ic50_dict[chamber_name]['ic50'] - sample_ic50_dict[chamber_name]['ic50_error'],),
                                             inhibition_model(x_logspace,  r_max=r_max_avg, r_min=r_min_avg, ic50=sample_ic50_dict[chamber_name]['ic50'] + sample_ic50_dict[chamber_name]['ic50_error'],),
                                             color='orange', alpha=0.3)
-            
+
             ### PLOT INDIVIDUAL K_i VALUES ###
             chamber_initial_slopes = filtered_initial_slopes[list(chamber_idxs).index(chamber_id), :]
             chamber_normed_initial_slopes = chamber_initial_slopes/ np.nanmax(chamber_initial_slopes)
@@ -1000,16 +1143,16 @@ class HTBAMExperiment:
             #plot with error bars:
             ax.scatter(x_data, y_data, color='blue',zorder=3, label='Chamber')
             x_logspace = np.logspace(np.log10(np.nanmin(x_data[1:])), np.log10(np.nanmax(x_data)), 100)
-        
+
             ax.plot(x_logspace, inhibition_model(x_logspace, **fit_params), color='blue',zorder=3, label='Chamber Fit')
 
             ax.set_xscale('log')
             ax.text(0.03, 0.15, '$IC_{50}$' + ': {:.3f} '.format(fit_params['ic50']) +'blah', transform=ax.transAxes, fontsize=12,)
-            ax.text(0.02,0.05, ' $\overline{IC_{50}}$: ' + '{:.3f}'.format(sample_ic50_dict[chamber_name]["ic50"]) 
-                    + '$\pm$ {:.3f}'.format(sample_ic50_dict[chamber_name]["ic50_error"]) + ' blah', transform=ax.transAxes, fontsize=12,) 
-              
+            ax.text(0.02,0.05, ' $\overline{IC_{50}}$: ' + '{:.3f}'.format(sample_ic50_dict[chamber_name]["ic50"])
+                    + '$\pm$ {:.3f}'.format(sample_ic50_dict[chamber_name]["ic50_error"]) + ' blah', transform=ax.transAxes, fontsize=12,)
+
             ax.legend()
-            
+
             return ax
 
 
@@ -1017,18 +1160,18 @@ class HTBAMExperiment:
         plot_chip(ic50_to_plot, chamber_names_dict, graphing_function=plot_chamber_ic50, title='Filtered IC50s')
 
     def plot_filtered_mm(self, run_name: str,
-                         enzyme_conc_conversion: float = 1.0, 
+                         enzyme_conc_conversion: float = 1.0,
                          show_average_fit: bool = False,
                          mm_model = None,
                          background_subtraction: bool = False):
-        
+
         if mm_model is None:
             # default model
             def mm_model(x, v_max, K_m):
                 return v_max*x/(K_m + x)
         elif show_average_fit:
             raise ValueError("Cannot show average fit with custom model.")
-            
+
         #first, fill it with NaNs as a placeholder:
         mm_to_plot = {chamber_idx: np.nan for chamber_idx in self._run_data[run_name]["chamber_idxs"]}
 
@@ -1039,7 +1182,7 @@ class HTBAMExperiment:
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'bgsub_linear_regression' if background_subtraction else 'linear_regression', 'slopes')
         initial_rate_arr = np.array(list(initial_rates_dict.values()))
         chamber_idxs = list(initial_rates_dict.keys())
-      
+
         filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
         filtered_initial_slopes = deepcopy(initial_rate_arr)
         for filter in filters: filtered_initial_slopes *= filter
@@ -1052,7 +1195,7 @@ class HTBAMExperiment:
                 cham_kcat = deepcopy(self._db_conn.get_analysis(run_name, 'mm_raw', 'kcat')[chamber_idx])
 
                 mm_to_plot[chamber_idx] = cham_kcat
-        
+
         chamber_names_dict = self._db_conn.get_chamber_name_dict()
 
         #plotting function: We'll generate an MM subplot for each chamber.
@@ -1066,7 +1209,7 @@ class HTBAMExperiment:
             #find the name of the chamber:
             chamber_name = chamber_names_dict[chamber_id]
 
-            
+
             #first, find all chambers with this name:
             #if there's no data, just skip!
             if chamber_name not in sample_mm_dict.keys():
@@ -1077,10 +1220,10 @@ class HTBAMExperiment:
 
             #get the initial rates for each chamber:
             initial_slopes = deepcopy(filtered_initial_slopes[chamber_id_list,:])
-        
+
             normed_initial_slopes = initial_slopes / (enzyme_concentrations[chamber_id_list][: , np.newaxis] * enzyme_conc_conversion)
 
-           
+
             #get average
             initial_slopes_avg = np.nanmean(normed_initial_slopes, axis=0)
             #get error bars
@@ -1092,7 +1235,7 @@ class HTBAMExperiment:
             #plot with error bars:
             ax.errorbar(x_data, y_data, yerr=initial_slopes_std,  ls="None", capsize=3, color='orange')
             ax.scatter(x_data, y_data, color='orange', s=100)
-          
+
             if show_average_fit:
                 x_linspace = np.linspace(np.nanmin(x_data), np.nanmax(x_data), 100)
                 ax.plot(x_linspace, mm_model(x_linspace, sample_mm_dict[chamber_name]['kcat'], sample_mm_dict[chamber_name]["K_m"]), color='orange', label='Average Fit')
@@ -1102,28 +1245,28 @@ class HTBAMExperiment:
 
             ### PLOT INDIVIDUAL K_i VALUES ###
             chamber_initial_slopes = deepcopy(filtered_initial_slopes[list(chamber_idxs).index(chamber_id), :])
-           
+
             chamber_normed_initial_slopes = chamber_initial_slopes/ (enzyme_concentrations[list(chamber_idxs).index(chamber_id)] * enzyme_conc_conversion)
-            
+
             x_data = substrate_concs
             y_data = chamber_normed_initial_slopes
 
             fit_params = deepcopy(self._db_conn.get_analysis(run_name, 'mm_raw', 'fit_params')[chamber_id])
-                    
+
             fit_params['v_max'] = fit_params['v_max']/(enzyme_concentrations[list(chamber_idxs).index(chamber_id)]* enzyme_conc_conversion)
             #plot with error bars:
             ax.scatter(x_data, y_data, color='blue', label='Chamber', zorder=3)
             x_linspace = np.linspace(np.nanmin(x_data), np.nanmax(x_data), 100)
-            
+
             ax.plot(x_linspace, mm_model(x_linspace, **fit_params), color='blue', label='Chamber Fit', zorder=3)
 
             ax.legend(loc='upper left')
             ax.text(0.7, 0.25, '$k_{cat}$' + ': {:.2f} '.format(fit_params['v_max']) +'$s^{-1}$', transform=ax.transAxes, fontsize=15,)
             ax.text(0.7, 0.18, '$K_M$: {:.2f} uM'.format(fit_params['K_m']), transform=ax.transAxes, fontsize=15)
-            ax.text(0.55,0.10, ' $\overline{k_{cat}}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["kcat"]) 
-                    + '$\pm$ {:.2f}'.format(sample_mm_dict[chamber_name]["kcat_std"]) + ' $s^{-1}$', transform=ax.transAxes, fontsize=15,) 
-            ax.text(0.55,0.03, ' $\overline{K_M}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["K_m"]) 
-                    + '$\pm$ {:.2f}'.format(sample_mm_dict[chamber_name]["K_m_std"]) + ' uM', transform=ax.transAxes, fontsize=15)           
+            ax.text(0.55,0.10, ' $\overline{k_{cat}}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["kcat"])
+                    + '$\pm$ {:.2f}'.format(sample_mm_dict[chamber_name]["kcat_std"]) + ' $s^{-1}$', transform=ax.transAxes, fontsize=15,)
+            ax.text(0.55,0.03, ' $\overline{K_M}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["K_m"])
+                    + '$\pm$ {:.2f}'.format(sample_mm_dict[chamber_name]["K_m_std"]) + ' uM', transform=ax.transAxes, fontsize=15)
             return ax
 
 
@@ -1142,14 +1285,14 @@ class HTBAMExperiment:
         with open(os.path.join(path_to_save, output_csv_name+'.csv'), 'w', newline='') as csvfile:
             writer = csv.writer(csvfile, delimiter=',')
             #write header:
-            writer.writerow(['id', 
+            writer.writerow(['id',
                             'x,y',
-                            'substrate_name', 
-                            'assay_type', 
-                            'replicates', 
-                            'Ki', 
-                            'Ki_mean_filtered', 
-                            'Ki_stdev_filtered', 
+                            'substrate_name',
+                            'assay_type',
+                            'replicates',
+                            'Ki',
+                            'Ki_mean_filtered',
+                            'Ki_stdev_filtered',
                             'enzyme',])
             #write data for each chamber:
             for i, chamber_idx in enumerate(self._run_data[run_name]["chamber_idxs"]):
@@ -1178,7 +1321,7 @@ class HTBAMExperiment:
                             'NaN', #K_i_stdev_filtered
                             self._run_data[run_name]["enzyme_concentration"][i], #enzyme
                     ]
-                
+
                 writer.writerow(row)
 
             #Summary CSV, showing data for each SAMPLE:
@@ -1187,21 +1330,21 @@ class HTBAMExperiment:
         with open(os.path.join(path_to_save, output_csv_name)+'_short.csv', 'w', newline='') as csvfile:
             writer = csv.writer(csvfile, delimiter=',')
             #write header:
-            writer.writerow(['id', 
-                            'substrate_name', 
-                            'assay_type', 
-                            'replicates', 
-                            'Ki_mean_filtered', 
-                            'Ki_stdev_filtered', 
+            writer.writerow(['id',
+                            'substrate_name',
+                            'assay_type',
+                            'replicates',
+                            'Ki_mean_filtered',
+                            'Ki_stdev_filtered',
                             'enzyme'])
             #write data:
             for name, sample_dict in sample_ic50_dict.items():
                 row = [name,
                     name,
-                    "ic50_filtered", 
-                    len(sample_dict["ic50_replicates"]), 
-                    sample_dict["ic50"], 
-                    sample_dict["ic50_error"], 
+                    "ic50_filtered",
+                    len(sample_dict["ic50_replicates"]),
+                    sample_dict["ic50"],
+                    sample_dict["ic50_error"],
                     "What should this be?",
                     ]
                 writer.writerow(row)
@@ -1216,17 +1359,17 @@ class HTBAMExperiment:
         with open(os.path.join(path_to_save, output_csv_name+'.csv'), 'w', newline='') as csvfile:
             writer = csv.writer(csvfile, delimiter=',')
             #write header:
-            writer.writerow(['id', 
+            writer.writerow(['id',
                             'x,y',
-                            'sample_name', 
-                            'assay_type', 
-                            'replicates', 
-                            'kcat', 
+                            'sample_name',
+                            'assay_type',
+                            'replicates',
+                            'kcat',
                             'Km',
-                            'kcat_mean_filtered', 
+                            'kcat_mean_filtered',
                             'kcat_stdev_filtered',
                             'Km_mean_filtered',
-                            'Km_stdev_filtered', 
+                            'Km_stdev_filtered',
                             'enzyme',])
             #write data for each chamber:
             for i, chamber_idx in enumerate(self._run_data[run_name]["chamber_idxs"]):
@@ -1261,7 +1404,7 @@ class HTBAMExperiment:
                             'NaN', #Km_stdev_filtered
                             self._run_data[run_name]["enzyme_concentration"][i], #enzyme
                     ]
-                
+
                 writer.writerow(row)
 
             #Summary CSV, showing data for each SAMPLE:
@@ -1270,10 +1413,10 @@ class HTBAMExperiment:
         with open(os.path.join(path_to_save, output_csv_name)+'_short.csv', 'w', newline='') as csvfile:
             writer = csv.writer(csvfile, delimiter=',')
             #write header:
-            writer.writerow(['id', 
-                            'sample_name', 
-                            'assay_type', 
-                            'replicates', 
+            writer.writerow(['id',
+                            'sample_name',
+                            'assay_type',
+                            'replicates',
                             'kcat_mean_filtered',
                             'kcat_stdev_filtered',
                             'Km_mean_filtered',
@@ -1283,12 +1426,12 @@ class HTBAMExperiment:
             for name, sample_dict in sample_mm_dict.items():
                 row = [name,
                     name,
-                    "mm_filtered", 
-                    len(sample_dict["mm_replicates"]), 
-                    sample_dict["kcat"], 
+                    "mm_filtered",
+                    len(sample_dict["mm_replicates"]),
+                    sample_dict["kcat"],
                     sample_dict["kcat_std"],
                     sample_dict["K_m"],
-                    sample_dict["K_m_std"], 
+                    sample_dict["K_m_std"],
                     "What should this be?",
                     ]
                 writer.writerow(row)
@@ -1310,8 +1453,8 @@ class HTBAMExperiment:
                 initial_rates = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')[id]
                 rates.append(initial_rates)
             rate_arrs.append(np.array(rates).T)
-        
-        
+
+
         conc_data = ["{:.1f}".format(i) for i in self._run_data[run_name]["conc_data"]]
         # make data frame with columns : [concentration, pattern, rate]
         dict_list = []
@@ -1319,7 +1462,7 @@ class HTBAMExperiment:
             for j, rate_replicates in enumerate(rate_arrs[i]):
                 for rate in rate_replicates:
                     dict_list.append({'concentration': conc_data[j], 'pattern': pattern, 'rate': rate})
-                
+
         df = pd.DataFrame(dict_list)
 
         # violin plot by pattern
@@ -1334,7 +1477,7 @@ class HTBAMExperiment:
                         save_path: str,
                         substrate_name: str,
                         substrate_conc_unit: str,
-                        enzyme_conc_conversion: float = 1.0, 
+                        enzyme_conc_conversion: float = 1.0,
                         show_average_fit: bool = False,
                         mm_model = None,
                         background_subtraction: bool = False,
@@ -1354,7 +1497,7 @@ class HTBAMExperiment:
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'bgsub_linear_regression' if background_subtraction else 'linear_regression', 'slopes')
         initial_rate_arr = np.array(list(initial_rates_dict.values()))
         chamber_idxs = list(initial_rates_dict.keys())
-      
+
         filters = self._db_conn.get_filters(run_name, 'filtered_initial_rates')
         filtered_initial_slopes = deepcopy(initial_rate_arr)
         for filter in filters: filtered_initial_slopes *= filter
@@ -1362,18 +1505,18 @@ class HTBAMExperiment:
         sample_mm_dict = self._db_conn.get_sample_analysis_dict(run_name, 'mm_filtered')
         #  = dict()
         # for k, v in unsorted_sample_mm_dict.items():
-        #     sample_mm_dict[k.lower()] = v  
+        #     sample_mm_dict[k.lower()] = v
 
         chamber_names_dict = self._db_conn.get_chamber_name_dict()
         # chamber_names_dict = {k: v.lower() for k, v in uppercase_chamber_names_dict.items()}
 
         chamber_name_to_id_dict = self._db_conn.get_chamber_name_to_id_dict()
         # chamber_name_to_id_dict = {k.lower(): v for k, v in uppercase_chamber_name_to_id_dict.items()}
-        
+
         # sort sample_mm_dict alphabetically
         sample_mm_dict = dict(sorted(sample_mm_dict.items()))
 
-    
+
         def plot_chamber_mm(chamber_id, ax, title):
 
             #get the substrate concentrations that match with each initial rate:
@@ -1382,7 +1525,7 @@ class HTBAMExperiment:
             #find the name of the chamber:
             chamber_name = chamber_names_dict[chamber_id]
 
-            
+
             #first, find all chambers with this name:
             #if there's no data, just skip!
             if chamber_name not in sample_mm_dict.keys():
@@ -1393,10 +1536,10 @@ class HTBAMExperiment:
 
             #get the initial rates for each chamber:
             initial_slopes = deepcopy(filtered_initial_slopes[chamber_id_list,:])
-        
+
             normed_initial_slopes = initial_slopes / (enzyme_concentrations[chamber_id_list][: , np.newaxis] * enzyme_conc_conversion)
 
-           
+
             #get average
             initial_slopes_avg = np.nanmean(normed_initial_slopes, axis=0)
             #get error bars
@@ -1418,26 +1561,26 @@ class HTBAMExperiment:
                                             mm_model(x_linspace, avg_kcat + std_kcat, sample_mm_dict[chamber_name]['K_m']),
                                             color='blue', alpha=0.3)
 
-            
-            ax.text(0.2,0.15, ' $\overline{k_{cat}}$: ' + '{:.2f}'.format(avg_kcat) 
-                    + '$\pm$ {:.2f}'.format(std_kcat) + ' $s^{-1}$', transform=ax.transAxes, fontsize=8,fontfamily="Helvetica") 
-            ax.text(0.2,0.03, ' $\overline{K_M}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["K_m"]) 
+
+            ax.text(0.2,0.15, ' $\overline{k_{cat}}$: ' + '{:.2f}'.format(avg_kcat)
+                    + '$\pm$ {:.2f}'.format(std_kcat) + ' $s^{-1}$', transform=ax.transAxes, fontsize=8,fontfamily="Helvetica")
+            ax.text(0.2,0.03, ' $\overline{K_M}$: ' + '{:.2f}'.format(sample_mm_dict[chamber_name]["K_m"])
                     + '$\pm$ {:.2f}'.format(sample_mm_dict[chamber_name]["K_m_std"]) + ' ' + substrate_conc_unit, transform=ax.transAxes, fontsize=8,
-                    fontfamily="Helvetica")    
-            
-            
+                    fontfamily="Helvetica")
+
+
 
             ax.set_title(title, fontsize=9, fontfamily="Helvetica")
             ax.set_xlabel('$\it{[' + substrate_name + '] (' + substrate_conc_unit +')}$', fontfamily="Helvetica", fontsize=8, fontstyle="italic")
             for tick in ax.xaxis.get_major_ticks():
-                tick.label.set_fontsize(8) 
+                tick.label.set_fontsize(8)
                 tick.label.set_fontfamily("Helvetica")
             for tick in ax.yaxis.get_major_ticks():
-                tick.label.set_fontsize(8) 
+                tick.label.set_fontsize(8)
                 tick.label.set_fontfamily("Helvetica")
             ax.set_ylabel('$v_0/[E] (s^{-1})$', fontfamily="Helvetica", fontsize=8, fontstyle="italic")
             return ax
-        
+
         #with PdfPages('/Users/duncanmuir/Desktop/mm_curves_new.pdf') as pdf:
         page_counter = 0
         page_num = 1
@@ -1445,7 +1588,7 @@ class HTBAMExperiment:
         axs = axs.flatten()
         #org_lookup['id'] = org_lookup['id'].str.lower()
 
-    
+
         # fixed_sample_mm_dict = dict()
         # for old_name, values in sample_mm_dict.items():
         #     if old_name in org_lookup['org_name'].values:
@@ -1454,16 +1597,16 @@ class HTBAMExperiment:
         #         new_name = org_lookup.loc[(org_lookup['id'].str.lower() == old_name), 'org_name'].values[0]
 
         #     else:
-        #         print("YIKES:", old_name) 
+        #         print("YIKES:", old_name)
         #     if new_name in org_swap_dict.keys():
         #         new_name = org_swap_dict[new_name]
         #     fixed_sample_mm_dict[new_name] = (old_name, values)
         # fixed_sample_mm_dict = dict(sorted(fixed_sample_mm_dict.items()))
-        
-        
+
+
         for name, _ in sample_mm_dict.items():
             #old_name, values = values
-           
+
             plot_chamber_mm(chamber_name_to_id_dict[name][0], axs[page_counter], title=name)
             if page_counter == 14:
                 plt.tight_layout()
@@ -1479,16 +1622,16 @@ class HTBAMExperiment:
         plt.tight_layout()
         plt.savefig(save_path / f"mm_curve_page_{page_num}.png", dpi=300)
         plt.close(fig)
-            
-
-                
-            
 
 
-        
 
-    
-    
+
+
+
+
+
+
+
     ##############################
     #### Freiatas W.I.P. Code ####
     ##############################
@@ -1543,14 +1686,14 @@ class HTBAMExperiment:
     #                 s += f"{value}\n"
     #         s += "\t"*indent + '}\n'
     #         return s
-        
+
     #     data = self.get('') #get the whole thing
     #     return recursive_string(data, 0)
-    
+
     # def get(self, path):
     #     '''
     #     Returns the data from a given "path" in the database.
-    #     Input: 
+    #     Input:
     #         path (str): the "path" to the data to be returned.
     #             ex: "runs/standard_0/assays/0/chambers/1,1/sum_chamber"
     #     Output:
@@ -1563,7 +1706,7 @@ class HTBAMExperiment:
     #     #if root, return the whole thing
     #     if path == "":
     #         return self._get_dict_from_file()
-        
+
     #     #split the path object:
     #     path = path.parts
     #     data = self._get_dict_from_file()
@@ -1581,7 +1724,7 @@ class HTBAMExperiment:
     #         #         print(d)
     #         #     data = np.concatenate(data_list)
     #         #     return data
-            
+
     #         #handle errors
     #         if p not in data:
     #             error_string = f"Path {path_traversed+p} not found in database. \n"
@@ -1601,9 +1744,9 @@ class HTBAMExperiment:
     #     # #if this is a dict, convert all quantities to pint.Quantities
     #     # if type(data) == dict:
     #     #     data = self._make_quantities_from_serialized_dict(data)
-        
+
     #     return data
-    
+
     # ##########################################################################################
     # ########################### READING / WRITING to/from FILE  ##############################
     # ##########################################################################################
@@ -1616,7 +1759,7 @@ class HTBAMExperiment:
 
     #             Returns:
     #                     None
-    #     '''        
+    #     '''
     #     return {
     #         "file_version": CURRENT_VERSION,
     #         "chamber_metadata": {},
@@ -1665,17 +1808,17 @@ class HTBAMExperiment:
     #             else:
     #                 error_string += f"Made it to {path_traversed}, which is a {type(current_data)}"
     #             raise ValueError(error_string)
-            
+
     #         #continue down the path
     #         current_data = current_data[p]
     #         path_traversed += p + "/"
 
     #     #update the data
-    #     if path[-1] in current_data: 
+    #     if path[-1] in current_data:
     #         if current_data[path[-1]] != {}: #We can't overwrite data, but we'll allow overwriting blank placeholder dicts.
     #             raise ValueError(f"Path {path_traversed+path[-1]} already exists in database. Overwriting data is forbidden.")
     #     current_data[path[-1]] = new_data
-        
+
     #     #write to file
     #     #now, we've iterated down our full dict and changed some part of it. We'll pass back the full dict.
     #     self._write_file(full_data)
@@ -1690,12 +1833,12 @@ class HTBAMExperiment:
     #     '''
     #     if not data['is_quantity']:
     #         raise ValueError("Data is not a quantity.")
-        
+
     #     try:
     #         return np.array(data['values']) * self.ureg(data['unit'])
     #     except:
     #         raise ValueError(f"Could not convert data to quantity. Data: {data}")
-        
+
     # def _quantity_to_dict(self, quantity: pint.Quantity) -> dict:
     #     '''
     #     Converts a pint.Quantity to a dictionary with keys 'values', 'unit', and 'is_quantity'.
@@ -1706,7 +1849,7 @@ class HTBAMExperiment:
     #         'unit': str(quantity.units),
     #         'is_quantity': True
     #     }
-    
+
     # def _make_serializable_dict(self, data: dict) -> dict:
     #     '''
     #     Converts all pint.Quantities in a dictionary to dictionaries with keys 'values', 'unit', and 'is_quantity'.
@@ -1718,7 +1861,7 @@ class HTBAMExperiment:
     #         elif isinstance(value, dict):
     #             data[key] = self._make_serializable_dict(value)
     #     return data
-    
+
     # def _make_quantities_from_serialized_dict(self, data: dict) -> dict:
     #     '''
     #     Converts all dictionaries with keys 'values', 'unit', and 'is_quantity' to pint.Quantities.
@@ -1740,7 +1883,7 @@ class HTBAMExperiment:
     #     '''
     #     Populates an json_dict with kinetic data with the following schema:
     #     {button_quant: {
-         
+
     #         1,1: {
     #             sum_chamber: {'values': [...],
     #                         'unit': 'RFU',
@@ -1757,8 +1900,8 @@ class HTBAMExperiment:
 
     #     Returns:
     #         None
-    #     '''    
-    #     unique_chambers = standard_data_df[['id','x_center_chamber', 'y_center_chamber', 'radius_chamber', 
+    #     '''
+    #     unique_chambers = standard_data_df[['id','x_center_chamber', 'y_center_chamber', 'radius_chamber',
     #         'xslice', 'yslice', 'indices']].drop_duplicates(subset=["indices"]).set_index("indices")
     #     self._update_file(Path("chamber_metadata"), unique_chambers.to_dict("index") )
 
@@ -1799,19 +1942,19 @@ class HTBAMExperiment:
     #     #First, check if our standard_units is a valid unit of concentration:
     #     if self.ureg(standard_units).dimensionality != self.ureg.molar.dimensionality:
     #         raise ValueError(f"Units {standard_units} are not a valid unit of concentration.\nIs your capitalization correct?")
-        
+
     #     standard_data_df = pd.read_csv(standard_curve_data_path)
     #     standard_data_df['indices'] = standard_data_df.x.astype('str') + ',' + standard_data_df.y.astype('str')
-    #     i = 0    
+    #     i = 0
     #     std_assay_dict = {}
     #     #TODO: this bad convention of column names will be phased out soon.
     #     for prod_conc, subset in standard_data_df.groupby("concentration_uM"):
     #         squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=['sum_chamber', 'std_chamber'])
     #         squeezed["time_s"] = pd.Series([[0]]*len(squeezed), index=squeezed.index) #this tomfoolery is used to create a list with a single value, 0, for the standard curve assays.
-            
+
     #         #turn prod_conc into a pint.Quantity:
     #         prod_conc = np.array(prod_conc) * self.ureg(standard_units)
-            
+
     #         #turn it into a pint.Quantity:
     #         time_quantity = squeezed.iloc[0]["time_s"] * self.ureg("s")
 
@@ -1827,9 +1970,9 @@ class HTBAMExperiment:
     #         #make dict for each assay
     #         std_assay_dict[i] = {
     #             "conc": prod_conc, #serialize using our custom _quantity_to_dict function
-    #             "time": time_quantity, 
+    #             "time": time_quantity,
     #             "chambers": chambers_dict}
-            
+
     #         i += 1
 
     #     std_run_num = len([key for key in self.get(Path('runs')) if "standard_" in key])
@@ -1838,14 +1981,14 @@ class HTBAMExperiment:
     #         "type": standard_type,
     #         "assays": std_assay_dict
     #         }
-        
+
     #     #append to file
     #     standard_data_dict = self._make_serializable_dict(standard_data_dict) #convert all quantities to dicts so we can save to json
     #     self._update_file(Path("runs") / f"standard_{std_run_num}", standard_data_dict)
-        
+
     #     #update chamber metadata
     #     self._load_chamber_metadata(standard_data_df)
-       
+
     # def load_kinetics_data_from_file(self, kinetic_data_path: str, kinetic_name: str, kinetic_type: str, kinetic_units: str) -> None:
     #     '''
     #     Populates an dict with kinetic data with the following schema, and saves to the .HTBAM file:
@@ -1878,7 +2021,7 @@ class HTBAMExperiment:
 
     #     Returns:
     #             None
-    #     '''    
+    #     '''
 
     #     kinetic_data_df = pd.read_csv(kinetic_data_path)
     #     kinetic_data_df['indices'] = kinetic_data_df.x.astype('str') + ',' + kinetic_data_df.y.astype('str')
@@ -1895,12 +2038,12 @@ class HTBAMExperiment:
     #         #concentration number uses underscore as decimal point. Here, we replace and convert to a float:
     #         conc = float(conc.replace("_", "."))
     #         return conc
-        
-    #     i = 0    
+
+    #     i = 0
     #     kin_dict = {}
     #     for sub_conc, subset in kinetic_data_df.groupby("series_index"):
     #         squeezed = _squeeze_df(subset, grouping_index="indices", squeeze_targets=["time_s",'sum_chamber', 'std_chamber'])
-            
+
     #         #turn sub_conc into a pint.Quantity:
     #         sub_conc = np.array(parse_concentration(sub_conc)) * self.ureg(kinetic_units)
 
@@ -1918,7 +2061,7 @@ class HTBAMExperiment:
 
     #         #make dict for each assay
     #         kin_dict[i] = {
-    #             "conc": sub_conc, 
+    #             "conc": sub_conc,
     #             "time": time_quantity,
     #             "chambers": chambers_dict}
     #         i += 1
@@ -1929,7 +2072,7 @@ class HTBAMExperiment:
     #         "type": kinetic_type,
     #         "assays": kin_dict
     #     }
-        
+
     #     #append to file
     #     kinetics_data_dict = self._make_serializable_dict(kinetics_data_dict) #convert all quantities to dicts so we can save to json
     #     self._update_file(Path("runs") / f"kinetics_{kinetics_run_num}", kinetics_data_dict)
@@ -1938,7 +2081,7 @@ class HTBAMExperiment:
     #     '''
     #     Populates an json_dict with kinetic data with the following schema:
     #     {button_quant: {
-         
+
     #         1,1: {
     #             sum_chamber: [...],
     #             std_chamber: [...]
@@ -1951,7 +2094,7 @@ class HTBAMExperiment:
 
     #             Returns:
     #                     None
-    #     '''    
+    #     '''
     #     kinetic_data_df = pd.read_csv(kinetic_data_path)
     #     kinetic_data_df['indices'] = kinetic_data_df.x.astype('str') + ',' + kinetic_data_df.y.astype('str')
     #     try:
@@ -1959,7 +2102,7 @@ class HTBAMExperiment:
     #         "std_button_Button_Quant", "indices"]].drop_duplicates(subset=["indices"]).set_index("indices")
     #     except KeyError:
     #         raise HtbamDBException("ButtonQuant columns not found in kinetic data.")
-            
+
     #     button_quant_dict = unique_buttons.to_dict("index")
     #     #convert to pint.Quantity:
     #     for chamber_coord, chamber_dict in button_quant_dict.items():
@@ -1999,11 +2142,11 @@ class HTBAMExperiment:
     #     chamber_coords = self.get_chamber_coords() #this way chamber_coords and chamber_names are always the same order.
     #     chamber_names = np.array([metadata_dict[chamber_coord]['id'] for chamber_coord in chamber_coords])
     #     return chamber_names
-    
+
     # def get_run_data(self, run_name):
     #     '''
     #     Returns the data from a given run as numpy arrays.
-    #     Input: 
+    #     Input:
     #         run_name (str): the name of the run to be converted to numpy arrays.
     #     Output:
     #         chamber_ids: an array of the chamber ids (in the format '1,1' ... '32,56')
@@ -2076,7 +2219,7 @@ class HTBAMExperiment:
     #             luminance_data = current_luminance_array
     #         else:
     #             luminance_data = np.concatenate([luminance_data, current_luminance_array], axis=2)
-            
+
     #         #Get concentration data:
     #         #collect from DB
     #         current_conc = run_data['assays'][assay]['conc']
@@ -2088,12 +2231,12 @@ class HTBAMExperiment:
 
     #     #sort luminance data by conc_data:
     #     luminance_data = luminance_data[:,:,sorting_idxs]
-        
+
     #     return chamber_coords, luminance_data, conc_data, time_data
-    
+
     # def save_new_analysis(self, run_name, analysis_name, chamber_dict):
     #     '''
-    #     Creates a new analysis in the database. 
+    #     Creates a new analysis in the database.
     #     Input:
     #         analysis_name (str): the name of the analysis to be created.
     #         run_name (str): the name of the run to be analyzed.
@@ -2123,9 +2266,9 @@ class HTBAMExperiment:
     #     #write to file
     #     analysis_dict = self._make_serializable_dict(analysis_dict)
     #     self._update_file(analysis_path, analysis_dict)
-    
 
-    
+
+
 
     # def export_json(self):
     #     '''This writes the database to file, as a dict -> json'''
