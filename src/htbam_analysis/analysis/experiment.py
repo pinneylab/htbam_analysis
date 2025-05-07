@@ -117,6 +117,26 @@ class HTBAMExperiment:
             return ax
         plot_chip(slopes_to_plot, chamber_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
 
+    def get_data(self, entity_name: str) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Obtains data from the database for a given data entity, such as a run or analysis.
+        The data is returned as a tuple of numpy arrays, where:
+          - the first array is the independent variable (e.g., time, concentration) of shape (n_variables) 
+          - the second array is the dependent variable (e.g., luminance) of shape (n_samples, n_variables,)
+
+        Args:
+            entity_name (str): The name of the data entity to be fetched.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: A tuple containing the independent and dependent variables as numpy arrays.
+        """
+        print(entity_name)
+        try: 
+            self._db_conn.get_entity_data(entity_name)
+        except HtbamDBException as e:
+            raise ValueError(f"Run data for {entity_name} not found in the database.")
+       
+
     def fit_initial_rates(self, run_name: str,
                           standard_run_name: str,
                           substrate_conc: float = None,
