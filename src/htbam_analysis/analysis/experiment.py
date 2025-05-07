@@ -26,6 +26,14 @@ from htbam_analysis.analysis.plotting import plot_chip
 def default_ic50_model(x, r_max, r_min, ic50):
     return r_min + (r_max-r_min)/(1+(x/ic50))
 
+def default_mm_model(x, v_max, K_m):
+    return v_max*x/(K_m + x)
+
+MODEL_DEFAULTS = {
+    'ic50': default_ic50_model,
+    'mm': default_mm_model
+}
+
 
 class HTBAMExperiment:
     def __init__(self, db_connection: AbstractHtbamDBAPI):
@@ -846,9 +854,6 @@ class HTBAMExperiment:
 
         #For each sample,
         for name, ids in chamber_names_dict.items():
-
-
-
             ### GATHER MM PARAMETERS OF REPLICATES FOR EACH SAMPLE: ###
             #get indices of idxs in chamber_idxs:
             idxs = [list(self._run_data[run_name]["chamber_idxs"]).index(x) for x in ids]
@@ -869,8 +874,6 @@ class HTBAMExperiment:
             #calculate z-score for each value:
             kcat_zscore = (kcats - np.nanmean(kcats))/np.nanstd(kcats)
             K_m_zscore = (K_ms - np.nanmean(K_ms))/np.nanstd(K_ms)
-
-
 
             #also, get z-score of enzyme expression for each well:
             enzyme_concentration_zscore = (enzyme_concentration[idxs] - np.nanmean(enzyme_concentration[idxs]))/np.nanstd(enzyme_concentration[idxs]) #in units of 'substrate_conc_unit'
@@ -932,127 +935,100 @@ class HTBAMExperiment:
         *,
         run_name: str,
         model_type: str,
-        target_params: List[str],
-        target_param_errors: Optional[List[str]] = None,
+        independent_var: str,
+        dependent_var: str,
+        filters: Optional[List[str]] = None,
         model_fn: Optional[Callable] = None,
-        independent_var: Union[str, Tuple[str, str]] = 'concentration',
-        dependent_var: Union[str, Tuple[str, str]] = ('filtered_initial_rates', 'slopes'),
     ):
-        if target_param_errors is None:
-            target_param_arrays = []
+        # TODO: this fn is built implicitly assuming that there is only one independent var
+        # i don't think its much of a stretch to make this for multiple independent vars
 
-        model_defaults = {
-            'ic50': default_ic50_model
-        }
-        assert model_type in model_defaults, (f"we currently don't support {model_type} fitting, "
-                                              f"available fits are {model_defaults.keys()}")
+        if filters is None:
+            filters = []
+
+        assert model_type in MODEL_DEFAULTS, (f"we currently don't support {model_type} fitting, "
+                                              f"available fits are {MODEL_DEFAULTS.keys()}")
         if model_fn is None:
-            model_fn = model_defaults[model_type]
+            model_fn = MODEL_DEFAULTS[model_type]
 
+        # get fit function params
         arg_list = str(inspect.signature(model_fn)).strip("()").replace(" ", "").split(",")
-        for p in target_params:
-            assert p in arg_list, f"model fn does not have param {p}"
-        for p in target_param_errors:
-            assert p in arg_list, f"model fn does not have param {p} to compute error of"
+        fit_params = deepcopy(arg_list[1:])
+        fit_param_errors = deepcopy(arg_list[1:])
 
         # get data
-        chamber_idxs, luminance_data, conc_data, _ = self._db_conn.get_run_assay_data(run_name)
-        run_assay_data = {'chamber_idxs': chamber_idxs, 'luminance': luminance_data, 'concentration': conc_data}
-        if isinstance(independent_var, str):
-            indep_var_arr = run_assay_data[independent_var]
-        else:
-            indep_var_dict = self._db_conn.get_filtered_analysis(run_name, *independent_var)
-            indep_var_arr = np.array(list(indep_var_dict.values()))
-        if isinstance(dependent_var, str):
-            dep_var_arr = run_assay_data[dependent_var]
-        else:
-            dep_var_dict = self._db_conn.get_filtered_analysis(run_name, *dependent_var)
-            dep_var_arr = np.array(list(dep_var_dict.values()))
+        chamber_idxs = self._db_conn.get_data(run_name, "chamber_idxs")  # TODO: is the chamber dim gonna be implicit or explicit?
+        indep_var_data = self._db_conn.get_data(run_name, independent_var)
+        indep_var_arr = indep_var_data[independent_var]
+        dep_var_data = self._db_conn.get_data(run_name, dependent_var)
+        dep_var_arr = dep_var_data[dependent_var]
 
-        filters = self._db_conn.get_filters(run_name, dependent_var[0])
-        filtered_dep_var_arr = math.prod(filters) * dep_var_arr
+        filter_arrs = [self._db_conn.get_filter(run_name, f) for f in filters]
+        filtered_dep_var_arr = math.prod(filter_arrs) * dep_var_arr
 
         # Calculate the model params for each chamber.
-        target_param_arrays = {
+        fit_param_arrays = {
             p: np.array([])
-            for p in target_params
+            for p in fit_params
         }
-        target_param_error_arrays = {
+        fit_param_error_arrays = {
             p: np.array([])
-            for p in target_param_errors
+            for p in fit_param_errors
         }
-        fit_params = []
-        fit_params_errs = []
         _count = 0
+
+        def add_nan_param():
+            for p in fit_params:
+                fit_param_arrays[p] = np.append(fit_param_arrays[p], np.nan)
+            for p in fit_param_errors:
+                fit_param_error_arrays[p] = np.append(fit_param_error_arrays[p], np.nan)
+            _count += 1
+
         for i in range(len(chamber_idxs)):
             current_dep_var_arr = filtered_dep_var_arr[i, :]
 
             if np.all(np.isnan(current_dep_var_arr)) or np.all(current_dep_var_arr == 0):
                 #print('Chamber {} has no slopes!'.format(chamber_idxs[i]))
-                for p in target_params:
-                    target_param_arrays[p] = np.append(target_param_arrays[p], np.nan)
-                for p in target_param_errors:
-                    target_param_error_arrays[p] = np.append(target_param_error_arrays[p], np.nan)
-                fit_params.append(dict(zip(arg_list[1:], [np.nan]*len(arg_list[1:]))))
-                fit_params_errs.append(dict(zip(arg_list[1:], [np.nan]*len(arg_list[1:]))))
-                _count += 1
+                add_nan_param()
                 continue
 
             #get indices of non-nan values:
             non_nan_idxs = np.where(~np.isnan(current_dep_var_arr))[0]
+            if non_nan_idxs.size() < 3:
+                #print('Chamber {} has fewer than 3 slopes!'.format(chamber_idxs[i]))
+                add_nan_param()
+                continue
 
             current_dep_var_arr = current_dep_var_arr[non_nan_idxs]
             current_indep_var_arr = indep_var_arr[non_nan_idxs]
 
-            if len(current_dep_var_arr) < 3:
-                #print('Chamber {} has fewer than 3 slopes!'.format(chamber_idxs[i]))
-                for p in target_params:
-                    target_param_arrays[p] = np.append(target_param_arrays[p], np.nan)
-                for p in target_param_errors:
-                    target_param_error_arrays[p] = np.append(target_param_error_arrays[p], np.nan)
-                fit_params.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
-                fit_params_errs.append({i:j for i,j in zip(arg_list[1:], [np.nan]*len(arg_list[1:]))})
-                _count += 1
-                continue
-
-            # max_normed_slopes = current_slopes / np.nanmax(current_slopes)
-
             try:
                 p_opt, p_cov = curve_fit(model_fn, current_indep_var_arr, current_dep_var_arr)
-                param_dict = dict(zip(arg_list[1:], p_opt))
+                param_dict = dict(zip(arg_list, p_opt))
                 fit_err = np.sqrt(np.diag(p_cov))
-                param_error_dict = dict(zip(arg_list[1:], fit_err))
-                for p in target_params:
-                    target_param_arrays[p] = np.append(target_param_arrays[p], param_dict[p])
-                for p in target_param_errors:
-                    target_param_error_arrays[p] = np.append(target_param_error_arrays[p], param_error_dict[p])
-                fit_params.append(param_dict)
-                fit_params_errs.append(param_error_dict)
+                param_error_dict = dict(zip(arg_list, fit_err))
+                for p in fit_params:
+                    fit_param_arrays[p] = np.append(fit_param_arrays[p], param_dict[p])
+                for p in fit_param_errors:
+                    fit_param_error_arrays[p] = np.append(fit_param_error_arrays[p], param_error_dict[p])
             except RuntimeError:
-                for p in target_params:
-                    target_param_arrays[p] = np.append(target_param_arrays[p], np.nan)
-                for p in target_param_errors:
-                    target_param_error_arrays[p] = np.append(target_param_error_arrays[p], np.nan)
-                fit_params.append(dict(zip(arg_list[1:], [np.nan]*len(arg_list[1:]))))
-                fit_params_errs.append(dict(zip(arg_list[1:], [np.nan]*len(arg_list[1:]))))
+                add_nan_param()
                 _count += 1
 
         # chamber_idxs, luminance_data, conc_data, time_data
 
         for i, chamber_idx in enumerate(chamber_idxs):
-            analysis = {
-                'fit_params': fit_params[i],
-                'fit_params_errs': fit_params_errs[i]
-            }
+            analysis = {}
             analysis.update({
-                p: target_param_arrays[p][i]
-                for p in target_params
+                p: fit_param_arrays[p][i]
+                for p in fit_params
             })
             analysis.update({
-                f"{p}_error": target_param_error_arrays[p][i]
-                for p in target_param_errors
+                f"{p}_error": fit_param_error_arrays[p][i]
+                for p in fit_param_errors
             })
 
+            # TODO: whatever save API we end up using
             self._db_conn.add_analysis(
                 run_name,
                 f'{model_type}_raw',
