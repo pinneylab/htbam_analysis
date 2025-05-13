@@ -1217,13 +1217,15 @@ class ButtonBindingSeries:
         self.prey_exposure = prey_exposure 
         self.bait_channel = bait_channel
         self.bait_exposure = bait_exposure
-
-    def grab_binding_images(self, binding_path: str, verbose: bool=True):
+    
+    def grab_binding_images(self, binding_path: str, verbose: bool=True, concentration_parser: Optional[Callable[[str], float]] = None):
         """Grabs images from a directory structure for PreWash and PostWash conditions.
 
         Args:
             binding_path (str): Root directory containing image data.
             verbose (bool, optional): Whether to print paths to found images. Defaults to True.
+            concentration_parser (callable, optional): Function to extract concentration from file path.
+                If None, a default parser will be used.
 
         Returns:
             None
@@ -1239,36 +1241,9 @@ class ButtonBindingSeries:
                 )
             return glob(os.path.join(parent_path, handle))
         
-        self.prewash_bait_images = get_images(binding_path, self.bait_exposure, self.bait_channel, postwash=False)
-        self.postwash_bait_images = get_images(binding_path, self.bait_exposure, self.bait_channel, postwash=True)
-        self.postwash_prey_images = get_images(binding_path, self.prey_exposure, self.prey_channel, postwash=True)
-        self.binding_path = binding_path
-
-        if verbose:
-            print('PREWASH BAIT IMAGES:\n' + '\n'.join(self.prewash_bait_images) + '\n')
-            print('POSTWASH BAIT IMAGES:\n' + '\n'.join(self.postwash_bait_images) + '\n')
-            print('POSTWASH PREY IMAGES:\n' + '\n'.join(self.postwash_prey_images))
-
-    def process(
-            self, 
-            concentration_parser: Optional[Callable[[str], float]] = None
-            ) -> None:
-        """Processes binding images to quantify signal across concentrations.
-
-        Args:
-            concentration_parser (callable, optional): Function to extract concentration from file path.
-                If None, a default parser will be used.
-
-        Returns:
-            None
-
-        Raises:
-            ValueError: If the concentration cannot be extracted from the file name.
-        """
-
         # default function for grabbing concentrations from filenames using regex  
         def concentration_parser_default(file: str):
-            parent_path = self.binding_path
+            parent_path = binding_path
 
             # use regex to pull out note
             handle = os.path.relpath(file, parent_path).split('/')[0]
@@ -1288,8 +1263,39 @@ class ButtonBindingSeries:
             concentration = float(concentration.replace('_', '.'))
 
             return concentration
-
+        
         concentration_parser = concentration_parser if concentration_parser else concentration_parser_default
+
+
+        self.prewash_bait_images = get_images(binding_path, self.bait_exposure, self.bait_channel, postwash=False)
+        self.prewash_bait_concentrations = [concentration_parser(f) for f in self.prewash_bait_images]
+
+        self.postwash_bait_images = get_images(binding_path, self.bait_exposure, self.bait_channel, postwash=True)
+        self.postwash_bait_concentrations = [concentration_parser(f) for f in self.postwash_bait_images]
+
+        self.postwash_prey_images = get_images(binding_path, self.prey_exposure, self.prey_channel, postwash=True)
+        self.postwash_prey_concentrations = [concentration_parser(f) for f in self.postwash_prey_images]
+
+        if verbose:
+            print('PREWASH BAIT IMAGES:\n' + '\n'.join(self.prewash_bait_images) + '\n')
+            print('POSTWASH BAIT IMAGES:\n' + '\n'.join(self.postwash_bait_images) + '\n')
+            print('POSTWASH PREY IMAGES:\n' + '\n'.join(self.postwash_prey_images))
+
+    def process(
+            self, 
+            save_summary_images: bool = True
+            ) -> None:
+        """Processes binding images to quantify signal across concentrations.
+
+        Args:
+            save_summary_images (bool, optional): Specifies whether or not summary images are saved.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If the concentration cannot be extracted from the file name.
+        """
 
         # utility function for processing binding images
         def process_binding_images(
@@ -1318,47 +1324,47 @@ class ButtonBindingSeries:
                 chip_quant = ChipQuant(reference_device, 'ButtonReference')
                 chip_quant.load_file(f, channel, exposure)
                 chip_quant.process(reference=reference_chip)
-                chip_quant.save_summary_image()
+
+                if save_summary_images:
+                    chip_quant.save_summary_image()
 
                 _data = chip_quant.summarize()
                 _data['concentration'] = [c] * len(_data)
                 data.append(_data)
 
             data = pd.concat(data)
+            data.sort_values(by=['x', 'y', 'concentration'], inplace=True)
             return data
 
         print('Processing Pre-Wash Bait Images...')
         self.prewash_bait_data = process_binding_images(
             self.prewash_bait_images, 
-            [concentration_parser(f) for f in self.prewash_bait_images],
+            self.prewash_bait_concentrations,
             self.bait_channel,
             self.bait_exposure, 
             self.device,
             self.button_ref.chip
             )
-        self.prewash_bait_data.sort_values(by=['x', 'y', 'concentration'], inplace=True)
 
         print('Processing Post-Wash Bait Images...')
         self.postwash_bait_data = process_binding_images(
             self.postwash_bait_images, 
-            [concentration_parser(f) for f in self.postwash_bait_images],
+            self.postwash_bait_concentrations,
             self.bait_channel,
             self.bait_exposure, 
             self.device,
             self.button_ref.chip
             )
-        self.postwash_bait_data.sort_values(by=['x', 'y', 'concentration'], inplace=True)
 
         print('Processing Post-Wash Prey Images...')
         self.postwash_prey_data = process_binding_images(
             self.postwash_prey_images, 
-            [concentration_parser(f) for f in self.postwash_prey_images],
+            self.postwash_prey_concentrations,
             self.prey_channel,
             self.prey_exposure, 
             self.device,
             self.button_ref.chip
             )
-        self.postwash_prey_data.sort_values(by=['x', 'y', 'concentration'], inplace=True)
 
     def save_summary(self, outpath: str, description: Optional[str] = None):
         """Saves a CSV summary of the binding data to the specified path.
