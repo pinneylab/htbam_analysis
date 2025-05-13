@@ -4,7 +4,7 @@ on:
     branches:
       - main
       - feature/*
-      - binding-process-refactor
+      - binding-processing-refactor
 env:
   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
