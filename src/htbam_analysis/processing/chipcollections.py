@@ -1276,6 +1276,9 @@ class ButtonBindingSeries:
         self.postwash_prey_images = get_images(binding_path, self.prey_exposure, self.prey_channel, postwash=True)
         self.postwash_prey_concentrations = [concentration_parser(f) for f in self.postwash_prey_images]
 
+        if not len(self.prewash_bait_images) == len(self.postwash_bait_images) == len(self.postwash_prey_images):
+            raise ValueError("The number of PreWash bait, PostWash bait, and PostWash prey images must be equal!")
+
         if verbose:
             print('PREWASH BAIT IMAGES:\n' + '\n'.join([f'{i} / {c}' for i,c in zip(self.prewash_bait_images, self.prewash_bait_concentrations)]) + '\n')
             print('POSTWASH BAIT IMAGES:\n' + '\n'.join([f'{i} / {c}' for i,c in zip(self.postwash_bait_images, self.postwash_bait_concentrations)]) + '\n')
