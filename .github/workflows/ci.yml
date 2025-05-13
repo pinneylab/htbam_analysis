@@ -3,6 +3,8 @@ on:
   push:
     branches:
       - main
+      - feature/*
+      - binding-process-refactor
 env: # Or as an environment variable
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 jobs:
