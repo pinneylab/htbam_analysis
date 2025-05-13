@@ -1277,9 +1277,9 @@ class ButtonBindingSeries:
         self.postwash_prey_concentrations = [concentration_parser(f) for f in self.postwash_prey_images]
 
         if verbose:
-            print('PREWASH BAIT IMAGES:\n' + '\n'.join(self.prewash_bait_images) + '\n')
-            print('POSTWASH BAIT IMAGES:\n' + '\n'.join(self.postwash_bait_images) + '\n')
-            print('POSTWASH PREY IMAGES:\n' + '\n'.join(self.postwash_prey_images))
+            print('PREWASH BAIT IMAGES:\n' + '\n'.join([f'{i} / {c}' for i,c in zip(self.prewash_bait_images, self.prewash_bait_concentrations)]) + '\n')
+            print('POSTWASH BAIT IMAGES:\n' + '\n'.join([f'{i} / {c}' for i,c in zip(self.postwash_bait_images, self.postwash_bait_concentrations)]) + '\n')
+            print('POSTWASH PREY IMAGES:\n' + '\n'.join([f'{i} / {c}' for i,c in zip(self.postwash_prey_images, self.postwash_prey_concentrations)]))
 
     def process(
             self, 
