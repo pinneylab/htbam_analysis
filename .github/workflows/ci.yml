@@ -45,10 +45,9 @@ jobs:
       - name: Test with unittest
         run: | 
           poetry run coverage run --source=src -m unittest test/test*.py
-
       - name: Upload coverage result
         env:
           COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         run: |
             poetry run coveralls
