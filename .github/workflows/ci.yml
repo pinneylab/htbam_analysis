@@ -4,39 +4,51 @@ on:
     branches:
       - main
       - feature/*
-env:
-  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      - *refactor*
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+        - "3.9"
+        - "3.10"
+        # - "3.11"
+        # - "3.12"
+        # - "3.13"
+        os: [ubuntu-latest, macos-latest]
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
-          lfs: true 
+          lfs: true
 
       - name: Pull LFS files
         run: git lfs pull
 
-      - name: Set up Python 3.9
-        uses: actions/setup-python@v3
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
         with:
-          python-version: 3.9
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install coverage
-          pip install coverage-badge
-          pip install numpy
-          pip install .
+          python -m pip install --upgrade pip 
+          pip install poetry
+          poetry install
+          poetry run pip install coverage coveralls
 
       - name: Test with unittest
         run: | 
-          coverage run --source=src -m unittest test/test*.py
-
-      - name: Upload coverage reports to Codecov
-        run: | 
-          curl -Os https://uploader.codecov.io/latest/linux/codecov
-          chmod +x codecov
-          ./codecov -t $CODECOV_TOKEN
+          poetry run coverage run --source=src -m unittest test/test*.py
+          
+      - name: Upload coverage result
+        env:
+          COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_REPO_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+            poetry run coveralls
