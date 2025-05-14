@@ -1218,14 +1218,14 @@ class ButtonBindingSeries:
         self.bait_channel = bait_channel
         self.bait_exposure = bait_exposure
     
-    def grab_binding_images(self, binding_path: str, verbose: bool=True, concentration_parser: Optional[Callable[[str], float]] = None):
+    def grab_binding_images(self, binding_path: str, verbose: bool=True, concentration_regex: str = r'd\d+_(\d+(?:_\d+)?)(?=[munp]?M)'):
         """Grabs images from a directory structure for PreWash and PostWash conditions.
 
         Args:
             binding_path (str): Root directory containing image data.
             verbose (bool, optional): Whether to print paths to found images. Defaults to True.
-            concentration_parser (callable, optional): Function to extract concentration from file path.
-                If None, a default parser will be used.
+            concentration_regex (str, optional): Regular expression to extract concentration values
+                from file paths. If None, a default parser will be used.
 
         Returns:
             None
@@ -1241,40 +1241,28 @@ class ButtonBindingSeries:
                 )
             return glob(os.path.join(parent_path, handle))
         
-        # default function for grabbing concentrations from filenames using regex  
-        def concentration_parser_default(file: str):
-            parent_path = binding_path
-
-            # use regex to pull out note
-            handle = os.path.relpath(file, parent_path).split('/')[0]
-            note_match = re.search(r"\d{8}-\d{6}-d\d+_(.+?)_(PreWash|PostWash)_Quant", handle)
-            if not note_match:
-                raise ValueError(f"Could not extract note from file path: {file}")
+        # utility function for extracting concentrations from file paths
+        def extract_concentration(file: str):
+            match = re.search(concentration_regex, file)
+            if not match:
+                raise ValueError(f"Could not extract concentration from file path: {file}\nYou may need to specify a custom regex to parse concentrations.")
             
-            note = note_match.group(1)
-
-            # then from note, grab the concentration
-            concentration_match = re.search(r"([^\W_]+)(?=[a-z]M)", note)
-            if not concentration_match:
-                raise ValueError(f"Could not extract concentration from note: {note}")
-
-            # convert numeric string to a float
-            concentration = concentration_match.group(1)
-            concentration = float(concentration.replace('_', '.'))
-
+            concentration_string = match.group(1)
+            try:
+                concentration = float(concentration_string.replace('_', '.'))
+            except:
+                raise ValueError(f'"{concentration_string}" concentration string could not be converted into a float. Make sure decimals are represented as hyphens.')
+            
             return concentration
-        
-        concentration_parser = concentration_parser if concentration_parser else concentration_parser_default
-
 
         self.prewash_bait_images = get_images(binding_path, self.bait_exposure, self.bait_channel, postwash=False)
-        self.prewash_bait_concentrations = [concentration_parser(f) for f in self.prewash_bait_images]
+        self.prewash_bait_concentrations = [extract_concentration(f) for f in self.prewash_bait_images]            
 
         self.postwash_bait_images = get_images(binding_path, self.bait_exposure, self.bait_channel, postwash=True)
-        self.postwash_bait_concentrations = [concentration_parser(f) for f in self.postwash_bait_images]
+        self.postwash_bait_concentrations = [extract_concentration(f) for f in self.postwash_bait_images]
 
         self.postwash_prey_images = get_images(binding_path, self.prey_exposure, self.prey_channel, postwash=True)
-        self.postwash_prey_concentrations = [concentration_parser(f) for f in self.postwash_prey_images]
+        self.postwash_prey_concentrations = [extract_concentration(f) for f in self.postwash_prey_images]
 
         if not len(self.prewash_bait_images) == len(self.postwash_bait_images) == len(self.postwash_prey_images):
             raise ValueError("The number of PreWash bait, PostWash bait, and PostWash prey images must be equal!")
