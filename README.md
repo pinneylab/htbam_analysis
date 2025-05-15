@@ -1,11 +1,13 @@
 # htbam_analysis
-Duncan Muir & Nicholas Freitas
+Duncan Muir
+Nicholas Freitas
+Jonathan Zhang
 
 Credits: Daniel Mohktari and Scott Longwell
 ___
 ![BuildStatus](https://github.com/pinneylab/htbam_analysis/actions/workflows/ci.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
-[![codecov](https://codecov.io/gh/pinneylab/htbam_analysis/graph/badge.svg?token=DWPK36TQQS)](https://codecov.io/gh/pinneylab/htbam_analysis)
+[![Coverage Status](https://coveralls.io/repos/github/pinneylab/htbam_analysis/badge.svg?branch=main)](https://coveralls.io/github/pinneylab/htbam_analysis?branch=main)
 
 ## Overview
 This is a *WORK IN PROGRESS* package for processing and analysing various assays from the HTBAM/HTMEK platform.

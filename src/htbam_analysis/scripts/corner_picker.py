@@ -88,8 +88,8 @@ for idx, s in enumerate(corner_slices):
             x_offset = 0
             corner_coords[i] = (event.x + x_offset, event.y + y_offset)
 
-            formatted = ", ".join(
-                f"({f'{pt[0]:.0f}' if pt is not None else 'None'}, {f'{pt[1]:.0f}' if pt is not None else 'None'})"
+            formatted = "COPY/PASTE ME INTO PROCESSING NOTEBOOK: " + ", ".join(
+                f"(({f'{pt[0]:.0f}' if pt is not None else 'None'}, {f'{pt[1]:.0f}' if pt is not None else 'None'}))"
                 for pt in corner_coords
             )
 

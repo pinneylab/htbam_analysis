@@ -91,3 +91,5 @@ build/
 dist/
 
 temp/
+
+test/test_data/Workup.log

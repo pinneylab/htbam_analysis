@@ -19,6 +19,7 @@ import pandas as pd
 from tqdm import tqdm
 from skimage import io
 import re
+from typing import Callable, Optional
 
 from htbam_analysis.processing.chip import ChipImage
 
@@ -1185,6 +1186,196 @@ class ButtonChamberAssaySeries:
 
     def _repr_pretty_(self, p, cycle=True):
         p.text("<{}>".format(self.__str__()))
+
+
+class ButtonBindingSeries:
+    def __init__(
+            self,
+            device,
+            button_ref,
+            prey_channel: str,
+            prey_exposure: int,
+            bait_channel: str = '2',
+            bait_exposure: int = 5
+            ) -> None:
+        """Initializes a ButtonBindingSeries object.
+
+        Args:
+            device: The imaging device used.
+            button_ref: A reference object containing chip information.
+            prey_channel (str): Channel used to detect prey.
+            prey_exposure (int): Exposure time for prey imaging.
+            bait_channel (str, optional): Channel used to detect bait. Defaults to '2'.
+            bait_exposure (int, optional): Exposure time for bait imaging. Defaults to 5.
+        
+        Returns:
+            None
+        """
+        self.device = device
+        self.button_ref = button_ref
+        self.prey_channel = prey_channel
+        self.prey_exposure = prey_exposure 
+        self.bait_channel = bait_channel
+        self.bait_exposure = bait_exposure
+    
+    def grab_binding_images(self, binding_path: str, verbose: bool=True, concentration_regex: str = r'd\d+_(\d+(?:_\d+)?)(?=[munp]?M)'):
+        """Grabs images from a directory structure for PreWash and PostWash conditions.
+
+        Args:
+            binding_path (str): Root directory containing image data.
+            verbose (bool, optional): Whether to print paths to found images. Defaults to True.
+            concentration_regex (str, optional): Regular expression to extract concentration values
+                from file paths. If None, a default parser will be used.
+
+        Returns:
+            None
+        """
+
+        # utility function that globs images generated with a specified exposure, channel, etc
+        def get_images(parent_path: str, exposure: int, channel: int, postwash: bool = True):
+            wash_timing = 'PostWash' if postwash else 'PreWash'
+            handle = '*{wash_timing}_Quant/{channel}/StitchedImages/BGSubtracted_StitchedImg_{exp}_{channel}_0.tif'.format(
+                wash_timing=wash_timing,
+                channel=channel, 
+                exp=exposure
+                )
+            return glob(os.path.join(parent_path, handle))
+        
+        # utility function for extracting concentrations from file paths
+        def extract_concentration(file: str):
+            match = re.search(concentration_regex, file)
+            if not match:
+                raise ValueError(f"Could not extract concentration from file path: {file}\nYou may need to specify a custom regex to parse concentrations.")
+            
+            concentration_string = match.group(1)
+            try:
+                concentration = float(concentration_string.replace('_', '.'))
+            except:
+                raise ValueError(f'"{concentration_string}" concentration string could not be converted into a float. Make sure decimals are represented as hyphens.')
+            
+            return concentration
+
+        self.prewash_bait_images = get_images(binding_path, self.bait_exposure, self.bait_channel, postwash=False)
+        self.prewash_bait_concentrations = [extract_concentration(f) for f in self.prewash_bait_images]            
+
+        self.postwash_bait_images = get_images(binding_path, self.bait_exposure, self.bait_channel, postwash=True)
+        self.postwash_bait_concentrations = [extract_concentration(f) for f in self.postwash_bait_images]
+
+        self.postwash_prey_images = get_images(binding_path, self.prey_exposure, self.prey_channel, postwash=True)
+        self.postwash_prey_concentrations = [extract_concentration(f) for f in self.postwash_prey_images]
+
+        if not len(self.prewash_bait_images) == len(self.postwash_bait_images) == len(self.postwash_prey_images):
+            raise ValueError("The number of PreWash bait, PostWash bait, and PostWash prey images must be equal!")
+
+        if verbose:
+            print('PREWASH BAIT IMAGES:\n' + '\n'.join([f'{i} / {c}' for i,c in zip(self.prewash_bait_images, self.prewash_bait_concentrations)]) + '\n')
+            print('POSTWASH BAIT IMAGES:\n' + '\n'.join([f'{i} / {c}' for i,c in zip(self.postwash_bait_images, self.postwash_bait_concentrations)]) + '\n')
+            print('POSTWASH PREY IMAGES:\n' + '\n'.join([f'{i} / {c}' for i,c in zip(self.postwash_prey_images, self.postwash_prey_concentrations)]))
+
+    def process(
+            self, 
+            save_summary_images: bool = True
+            ) -> None:
+        """Processes binding images to quantify signal across concentrations.
+
+        Args:
+            save_summary_images (bool, optional): Specifies whether or not summary images are saved.
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If the concentration cannot be extracted from the file name.
+        """
+
+        # utility function for processing binding images
+        def process_binding_images(
+                images: str,
+                concentrations: list,
+                channel: int, 
+                exposure: int,
+                reference_device, 
+                reference_chip, 
+                ):
+            """Processes a set of images with known concentrations.
+
+            Args:
+                images (str): List of image file paths.
+                concentrations (list): List of concentrations corresponding to each image.
+                channel (int): Imaging channel.
+                exposure (int): Exposure time.
+                reference_device: Device object used for reference.
+                reference_chip: Chip object used as a reference.
+
+            Returns:
+                pd.DataFrame: Concatenated data from all processed images.
+            """
+            data = []
+            for f, c in tqdm(zip(images, concentrations), total=len(images)):
+                chip_quant = ChipQuant(reference_device, 'ButtonReference')
+                chip_quant.load_file(f, channel, exposure)
+                chip_quant.process(reference=reference_chip)
+
+                if save_summary_images:
+                    chip_quant.save_summary_image()
+
+                _data = chip_quant.summarize()
+                _data['concentration'] = [c] * len(_data)
+                data.append(_data)
+
+            data = pd.concat(data)
+            data.sort_values(by=['x', 'y', 'concentration'], inplace=True)
+            return data
+
+        print('Processing Pre-Wash Bait Images...')
+        self.prewash_bait_data = process_binding_images(
+            self.prewash_bait_images, 
+            self.prewash_bait_concentrations,
+            self.bait_channel,
+            self.bait_exposure, 
+            self.device,
+            self.button_ref.chip
+            )
+
+        print('Processing Post-Wash Bait Images...')
+        self.postwash_bait_data = process_binding_images(
+            self.postwash_bait_images, 
+            self.postwash_bait_concentrations,
+            self.bait_channel,
+            self.bait_exposure, 
+            self.device,
+            self.button_ref.chip
+            )
+
+        print('Processing Post-Wash Prey Images...')
+        self.postwash_prey_data = process_binding_images(
+            self.postwash_prey_images, 
+            self.postwash_prey_concentrations,
+            self.prey_channel,
+            self.prey_exposure, 
+            self.device,
+            self.button_ref.chip
+            )
+
+    def save_summary(self, outpath: str, description: Optional[str] = None):
+        """Saves a CSV summary of the binding data to the specified path.
+
+        Args:
+            outpath (str): Path to the directory where summary files should be saved.
+            description (str, optional): Optional description to include in the filenames.
+
+        Returns:
+            None
+        """
+        if not description:
+            fn = "{dname}_TitrationSeries_Analysis".format(dname=self.device.dname)
+        else:   
+            fn = "{dname}_{desc}_TitrationSeries_Analysis".format(dname=self.device.dname, desc=description)
+
+        self.prewash_bait_data.to_csv(os.path.join(outpath, fn + "_prewash_bait.csv.bz2"), compression="bz2", index=True)
+        self.postwash_bait_data.to_csv(os.path.join(outpath, fn + "_postwash_bait.csv.bz2"), compression="bz2", index=True)
+        self.postwash_prey_data.to_csv(os.path.join(outpath, fn + "_postwash_prey.csv.bz2"), compression="bz2", index=True)
+
 
 class ProcessingException(Exception):
     pass
