@@ -19,16 +19,7 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
     #NB: eventually, store width/height in DB and reference!
     img_array = np.zeros([56,32])
 
-    plotting_var_mean = np.nanmean(list(plotting_var.values()))
-    plotting_var_std = np.nanstd(list(plotting_var.values()))
-
-    # nan values 3 std away from mean
-    for chamber_id, value in plotting_var.items():
-        if value > plotting_var_mean + 3*plotting_var_std:
-            plotting_var[chamber_id] = np.nan
-        elif value < plotting_var_mean - 3*plotting_var_std:
-            plotting_var[chamber_id] = np.nan
-
+    # Here we're plotting to value for each chamber (e.g. coloring by std curve slope)
     for chamber_id, value in plotting_var.items():
         x = int(chamber_id.split(',')[0])
         y = int(chamber_id.split(',')[1])
@@ -90,7 +81,7 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
             children = [
                 html.Div(children=[
                     #no space after header:
-                    html.H3('{},{}:  {}'.format(pt['x'], pt['y'], chamber_name), style={"color": 'black', "fontFamily":"Arial", "textAlign": "center", "marginBottom": "0px"}),
+                    html.H3('{},{}:  {}'.format(pt['x']+1, pt['y']+1, chamber_name), style={"color": 'black', "fontFamily":"Arial", "textAlign": "center", "marginBottom": "0px"}), #1-index
                     #add the image with reduced whitespace:
                     html.Img(src=img_src, style={"width": "100%"}),
                 ],
