@@ -31,7 +31,21 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
     
     #Create the figure
     layout = go.Layout()
-    fig = go.Figure(layout=layout, data=go.Heatmap(z=img_array, colorscale='Viridis'))
+
+    # create 1‐indexed axes
+    x_vals = list(range(1, img_array.shape[1] + 1))
+    y_vals = list(range(1, img_array.shape[0] + 1))
+
+    heatmap = go.Heatmap(
+        x=x_vals,
+        y=y_vals,
+        z=img_array,
+        colorscale='Viridis',
+        hovertemplate='x=%{x}<br>y=%{y}<br>z=%{z}<extra></extra>'
+    )
+    
+    fig = go.Figure(layout=layout, data=heatmap)
+
     #center title in fig
     fig.update_layout(title=title,
                         title_x=0.5, 
