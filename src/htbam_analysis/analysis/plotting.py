@@ -77,7 +77,7 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
                 return False, no_update, no_update
             # demo only shows the first point, but other points may also be available
             pt = hoverData["points"][0]
-            chamber_id = str(pt['x']+1) + ',' + str(pt['y']+1)
+            chamber_id = str(pt['x']) + ',' + str(pt['y'])
             bbox = pt["bbox"]
             chamber_name = chamber_names[chamber_id]
             #get the data for the point:
@@ -95,7 +95,7 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
             children = [
                 html.Div(children=[
                     #no space after header:
-                    html.H3('{},{}:  {}'.format(pt['x']+1, pt['y']+1, chamber_name), style={"color": 'black', "fontFamily":"Arial", "textAlign": "center", "marginBottom": "0px"}), #1-index
+                    html.H3('{},{}:  {}'.format(pt['x'], pt['y'], chamber_name), style={"color": 'black', "fontFamily":"Arial", "textAlign": "center", "marginBottom": "0px"}), #1-index
                     #add the image with reduced whitespace:
                     html.Img(src=img_src, style={"width": "100%"}),
                 ],
