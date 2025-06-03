@@ -32,7 +32,7 @@ def fit_luminance_vs_time(data: dict, *, min_pts: int = 2, start_timepoint: int 
     start = time.time()
     
     data_type = data['data_type']
-    assert data_type == 'kinetics', f"Data type {data_type} not supported. Requires 'kinetics' format."
+    assert data_type == 'RFU_data', f"Data type {data_type} not supported. Requires 'RFU_data' format."
     
     indep = data["indep_vars"]
     dep   = data["dep_vars"]
@@ -113,7 +113,7 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
     Parameters
     ----------
     data : dict
-        Dictionary in "kinetics" format (see htbam_db_api.py).
+        Dictionary in "RFU_data" format (see htbam_db_api.py).
     x : {"concentration", "time"}
         Which independent variable to use.
     y : key in  data["dep_vars"]
@@ -134,7 +134,7 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
     """
     start = time.time()
     data_type = data['data_type']
-    assert data_type == 'kinetics', f"Data type {data_type} not supported. Requires 'kinetics' format."
+    assert data_type == 'RFU_data', f"Data type {data_type} not supported. Requires 'RFU_data' format."
 
     indep = data["indep_vars"]
     dep   = data["dep_vars"]
@@ -196,3 +196,37 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
         }
     }
     return result
+
+def transform_data(data: dict, apply_to: str, store_as: str, function: callable, flatten: bool = False) -> dict:
+    """
+    Transform a data dictionary by applying a function to the specified dependent variable.
+
+    Parameters
+    ----------
+    data : dict
+        Dictionary in "RFU_data" format (see htbam_db_api.py).
+    apply_to : str
+        Key in data["dep_vars"] to apply the function to.
+    store_as : str
+        Key in data["dep_vars"] to store the transformed variable.
+    function : callable
+        Function to apply to the dependent variable.
+    flatten : bool, optional
+        If True, flatten the output array (default False).
+
+    Returns
+    -------
+    result : dict
+        New data dictionary with transformed dependent variable.
+    """
+    if apply_to not in data["dep_vars"]:
+        raise KeyError(f"'{apply_to}' not in data['dep_vars']")
+
+    transformed_data = deepcopy(data)
+    transformed_data["dep_vars"][store_as] = function(transformed_data["dep_vars"][apply_to])
+    transformed_data.pop(apply_to, None)  # Remove the original variable if needed
+
+    if flatten:
+        transformed_data["dep_vars"][apply_to] = transformed_data["dep_vars"][apply_to].flatten()
+
+    return transformed_data
