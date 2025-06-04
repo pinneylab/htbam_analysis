@@ -53,6 +53,7 @@ def fit_luminance_vs_time(data: dict, *, min_pts: int = 2, start_timepoint: int 
     T = indep["time"]                      # (n_conc , n_time)
     slope     = np.full((n_conc, n_chamb), np.nan, dtype=float)
     intercept = np.full_like(slope, np.nan)
+    r_squared = np.full_like(slope, np.nan)
 
     # What subset of points are we fitting on?
     RFU_for_fitting = Y[:, start_timepoint:end_timepoint, :]  # skip the first couple points, because we get weird values
@@ -81,10 +82,12 @@ def fit_luminance_vs_time(data: dict, *, min_pts: int = 2, start_timepoint: int 
         model.fit(Xi_c, y_good_c)
         intercept[i, good_chamb] = model.intercept_      # (K_good,)
         slope[i,     good_chamb] = model.coef_[:, 0]     # (K_good,)
+        r_squared[i, good_chamb] = model.score(Xi_c, y_good_c)  # R² for each chamber
 
     indep_out = {
         "concentration": indep["concentration"],
-        "chamber_IDs"  : indep["chamber_IDs"]
+        "chamber_IDs"  : indep["chamber_IDs"],
+        "sample_IDs"   : indep["sample_IDs"],
     }
 
     elapsed = time.time() - start
@@ -93,10 +96,12 @@ def fit_luminance_vs_time(data: dict, *, min_pts: int = 2, start_timepoint: int 
 
     # assemble result dict (shallow copy of independents for context)
     result = {
+        'data_type': 'linear_fit_data',
         "indep_vars": deepcopy(indep_out),
         "dep_vars"  : {
             "slope"     : slope,    # (n_conc, n_chamb)
             "intercept" : intercept,# (n_conc, n_chamb)
+            "r_squared" : r_squared,# (n_conc, n_chamb)
         },
         "meta": {
             "fit" : f"{y}_vs_{x}",
@@ -158,6 +163,7 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
     # slope/intercept per (time , chamber)
     slope     = np.full((n_chamb), np.nan, dtype=float)
     intercept = np.full_like(slope, np.nan)
+    r_squared = np.full_like(slope, np.nan)
 
     # In order to properly mask and remove NaN concentrations, we're iterating over chambers here.
     # This skullduggery makes it slower than the more difficult luminance vs time fit, but it still runs in ~1 second.
@@ -172,6 +178,7 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
         model.fit(X_all[good], y[good])
         intercept[j] = model.intercept_
         slope[j]     = model.coef_[0]
+        r_squared[j] = model.score(X_all[good], y[good])  # R² for each chamber
 
     elapsed = time.time() - start
     print(f'Fit slopes for {n_chamb} wells.')
@@ -180,15 +187,18 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
     # axes for context
     indep_out = {
         "time"       : indep["time"],      # (n_conc , n_time)
-        "chamber_IDs": indep["chamber_IDs"]
+        "chamber_IDs": indep["chamber_IDs"],
+        "sample_IDs" : indep["sample_IDs"]
     }
 
     # assemble result dict (shallow copy of independents for context)
     result = {
+        'data_type': 'linear_fit_data', # Is this the correct format for linear_fit_data? Dimensions are different I think.
         "indep_vars": deepcopy(indep_out),
         "dep_vars"  : {
             "slope"     : slope,     # (n_chamb,)
             "intercept" : intercept, # (n_chamb,)
+            "r_squared" : r_squared, # (n_chamb,)
         },
         "meta": {
             "fit" : f"{y_label}_vs_{x_label}",
@@ -197,7 +207,7 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
     }
     return result
 
-def transform_data(data: dict, apply_to: str, store_as: str, function: callable, flatten: bool = False) -> dict:
+def transform_data(data: dict, apply_to: str, store_as: str, function: callable, flatten: bool = False, data_type: str = None) -> dict:
     """
     Transform a data dictionary by applying a function to the specified dependent variable.
 
@@ -228,5 +238,8 @@ def transform_data(data: dict, apply_to: str, store_as: str, function: callable,
 
     if flatten:
         transformed_data["dep_vars"][apply_to] = transformed_data["dep_vars"][apply_to].flatten()
+
+    if data_type is not None:
+        transformed_data["data_type"] = data_type
 
     return transformed_data

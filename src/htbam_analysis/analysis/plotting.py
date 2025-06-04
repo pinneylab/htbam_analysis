@@ -1,4 +1,4 @@
-from dash import Dash, dcc, html, Input, Output, no_update
+from dash import Dash, dcc, html, Input, Output, no_update, State
 import plotly.graph_objs as go
 import base64
 import tempfile
@@ -103,5 +103,49 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
             ]
 
             return True, bbox, children
+        
+    ### Denote replicates on hover:
+    # add a callback to highlight replicates on hover
+    @app.callback(
+        Output("graph", "figure"),
+        Input("graph", "hoverData"),
+        State("graph", "figure"),
+    )
+    def highlight_replicates(hoverData, fig):
+        # 1) clear any old highlight shapes
+        old_shapes = fig["layout"].get("shapes", [])
+        fig["layout"]["shapes"] = [s for s in old_shapes if s.get("name") != "highlight"]
+
+        if not hoverData:
+            return fig
+
+        # 2) find sample under cursor
+        pt = hoverData["points"][0]
+        key = f"{pt['x']},{pt['y']}"
+        sample = chamber_names.get(key)
+        if sample is None:
+            return fig
+
+        # 3) collect all wells with that sample
+        xs, ys = [], []
+        for cid, name in chamber_names.items():
+            if name == sample:
+                i, j = map(int, cid.split(","))
+                xs.append(i)
+                ys.append(j)
+
+        # 4) add a squares‐only outline in data coords
+        new_shapes = []
+        for i, j in zip(xs, ys):
+            new_shapes.append(dict(
+                type="rect",
+                x0=i - 0.4, x1=i + 0.4,
+                y0=j - 0.4, y1=j + 0.4,
+                line=dict(color="red", width=2),
+                fillcolor="rgba(0,0,0,0)",
+                name="highlight"
+            ))
+        fig["layout"]["shapes"].extend(new_shapes)
+        return fig
 
     app.run_server()
