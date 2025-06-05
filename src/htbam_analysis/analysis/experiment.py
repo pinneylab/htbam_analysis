@@ -241,6 +241,65 @@ class HTBAMExperiment:
         
         plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_initial_rates, title='Kinetics: Initial Rates')
 
+    def plot_initial_rates_vs_concentration_chip(self,
+                                                 analysis_name: str,
+                                                 model_fit_name: str = None,
+                                                 x_log: bool = False,
+                                                 y_log: bool = False):
+        """
+        Plot initial rates (slopes) vs substrate concentration for each chamber.
+        Parameters:
+            analysis_name (str): the name of the analysis data object to be plotted.
+            model_fit_name (str): the name of the model data object to be plotted (contains MM or IC50 fits, etc).
+            x_log (bool): whether to plot x-axis on a logarithmic scale. Default is False.
+            y_log (bool): whether to plot y-axis on a logarithmic scale. Default is False.
+        """
+        # get raw experiment (for concentration) and analysis (for slopes)
+        analysis_data   = self.get_run(analysis_name)
+
+        slopes = analysis_data['dep_vars']['slope']           # Y: (n_conc, n_chambers)
+        conc   = analysis_data['indep_vars']['concentration'] # X: (n_conc,)
+
+        # If model_fit_name is provided, we can also plot the fitted model:
+        if model_fit_name is not None:
+            model_fit_data = self.get_run(model_fit_name)
+            slopes_pred = model_fit_data['dep_vars']['y_pred']  # (n_conc, n_chambers)
+            r_squared = model_fit_data['dep_vars']['r_squared']  # (n_chambers,)
+
+        # chamber/sample info
+        chambers = analysis_data['indep_vars']['chamber_IDs']
+        samples  = analysis_data['indep_vars']['sample_IDs']
+
+        # dicts for plot_chip
+        sample_names = {cid: samples[i] for i, cid in enumerate(chambers)}
+        mean_rates   = {cid: np.nanmean(slopes[:, i])
+                        for i, cid in enumerate(chambers)}
+
+        # per‐chamber inset: rate vs conc
+        def plot_rates_vs_conc(cid, ax):
+            idx = chambers == cid
+            y = slopes[:, idx].flatten()
+            x = conc
+            ax.scatter(x, y, alpha=0.7)
+            if model_fit_name is not None:
+                y_pred = slopes_pred[:, idx].flatten()
+                ax.plot(x, y_pred, color='red', label=f'R² = {r_squared[idx][0]:.2f}')
+                ax.legend()
+            ax.set_title(f"{cid}: {sample_names[cid]}")
+            ax.set_xlabel("Concentration")
+            ax.set_ylabel("Initial Rate")
+            # set log scale if requested
+            if x_log:
+                ax.set_xscale('log')
+            if y_log:
+                ax.set_yscale('log')
+            return ax
+
+        plot_chip(mean_rates,
+                  sample_names,
+                  graphing_function=plot_rates_vs_conc,
+                  title="Initial Rates vs Concentration")
+
     def plot_enzyme_concentration_chip(self, analysis_name: str, units:str, skip_start_timepoint: bool = True):
         '''
         Plot a full chip with raw data and fit initial rates.

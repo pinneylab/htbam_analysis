@@ -59,10 +59,19 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
 
     #create dash app:
     app = Dash(__name__)
-    app.layout = html.Div([
-        dcc.Graph(id="graph", figure=fig, clear_on_unhover=True),
-        dcc.Tooltip(id="graph-tooltip"),
-    ])
+    app.layout = html.Div(
+        style={'display': 'flex'},
+        children=[
+            html.Div(
+                style={'flex': '1'},
+                children=[
+                    dcc.Graph(id="graph", figure=fig, clear_on_unhover=True),
+                    dcc.Tooltip(id="graph-tooltip"),
+                ]
+            ),
+            html.Div(id="side-panel", style={'flex': '1', 'paddingLeft': '20px', 'backgroundColor': 'white'})  # Set side-panel background to white
+        ]
+    )
 
     ### GRAPHING FUNCTION ON HOVER:
     if graphing_function is not None:
@@ -103,49 +112,82 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
             ]
 
             return True, bbox, children
-        
-    ### Denote replicates on hover:
-    # add a callback to highlight replicates on hover
+
+    ### HIGHLIGHT ON HOVER / CLICK ###
     @app.callback(
         Output("graph", "figure"),
         Input("graph", "hoverData"),
+        Input("graph", "clickData"),
         State("graph", "figure"),
     )
-    def highlight_replicates(hoverData, fig):
-        # 1) clear any old highlight shapes
-        old_shapes = fig["layout"].get("shapes", [])
-        fig["layout"]["shapes"] = [s for s in old_shapes if s.get("name") != "highlight"]
+    def update_highlights(hoverData, clickData, fig):
+        # clear old shapes
+        fig["layout"]["shapes"] = []
 
-        if not hoverData:
-            return fig
+        # hover => red outlines
+        if hoverData:
+            pt = hoverData["points"][0]
+            sample = chamber_names.get(f"{pt['x']},{pt['y']}")
+            if sample:
+                for cid, name in chamber_names.items():
+                    if name == sample:
+                        i, j = map(int, cid.split(","))
+                        fig["layout"]["shapes"].append({
+                            "type": "rect",
+                            "x0": i-0.4, "x1": i+0.4,
+                            "y0": j-0.4, "y1": j+0.4,
+                            "line": {"color": "red", "width": 2},
+                            "fillcolor": "rgba(0,0,0,0)",
+                            "name": "hover"
+                        })
 
-        # 2) find sample under cursor
-        pt = hoverData["points"][0]
-        key = f"{pt['x']},{pt['y']}"
-        sample = chamber_names.get(key)
-        if sample is None:
-            return fig
+        # click => magenta outlines
+        if clickData:
+            pt = clickData["points"][0]
+            sample = chamber_names.get(f"{pt['x']},{pt['y']}")
+            if sample:
+                for cid, name in chamber_names.items():
+                    if name == sample:
+                        i, j = map(int, cid.split(","))
+                        fig["layout"]["shapes"].append({
+                            "type": "rect",
+                            "x0": i-0.4, "x1": i+0.4,
+                            "y0": j-0.4, "y1": j+0.4,
+                            "line": {"color": "magenta", "width": 3},
+                            "fillcolor": "rgba(0,0,0,0)",
+                            "name": "selected"
+                        })
 
-        # 3) collect all wells with that sample
-        xs, ys = [], []
-        for cid, name in chamber_names.items():
-            if name == sample:
-                i, j = map(int, cid.split(","))
-                xs.append(i)
-                ys.append(j)
-
-        # 4) add a squares‐only outline in data coords
-        new_shapes = []
-        for i, j in zip(xs, ys):
-            new_shapes.append(dict(
-                type="rect",
-                x0=i - 0.4, x1=i + 0.4,
-                y0=j - 0.4, y1=j + 0.4,
-                line=dict(color="red", width=2),
-                fillcolor="rgba(0,0,0,0)",
-                name="highlight"
-            ))
-        fig["layout"]["shapes"].extend(new_shapes)
         return fig
+
+    ### GRAPHING FUNCTION ON CLICK (side‐panel) ###
+    if graphing_function is not None:
+        @app.callback(
+            Output("side-panel", "children"),
+            Input("graph", "clickData"),
+        )
+        def display_click_side(clickData):
+            if clickData is None:
+                return no_update
+            # identify clicked chamber
+            pt = clickData["points"][0]
+            cid = f"{pt['x']},{pt['y']}"
+            sample = chamber_names.get(cid, "")
+
+            # generate inset plot PNG
+            fig2, ax2 = plt.subplots()
+            ax2 = graphing_function(cid, ax2)
+            fig2.subplots_adjust(left=0.1, bottom=0.1, right=0.9, top=0.9)
+            tmp = tempfile.NamedTemporaryFile().name + ".png"
+            plt.savefig(tmp)
+            plt.close(fig2)
+            with open(tmp, "rb") as f:
+                img_src = "data:image/png;base64," + base64.b64encode(f.read()).decode("utf-8")
+
+            # return side‐panel contents
+            return html.Div([
+                html.H3(f"{cid}: {sample}", style={"textAlign": "center"}),
+                html.Img(src=img_src, style={"width": "100%"})
+            ])
 
     app.run_server()
