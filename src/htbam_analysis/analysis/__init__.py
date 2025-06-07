@@ -2,7 +2,7 @@
 
 """Top-level package for analysis."""
 
-from htbam_analysis.analysis import experiment, plotting
+from htbam_analysis.analysis import experiment, plot
 
 __author__ = """Duncan Muir"""
 __email__ = ""

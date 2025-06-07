@@ -2,9 +2,11 @@ import time
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from copy import deepcopy
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from scipy.optimize import curve_fit
 import inspect
+
+from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
 
 ### Models:
 # These get passed to scipy's curve_fit function. The first argument is is always x, followed by the parameters to fit.
@@ -57,15 +59,15 @@ def inhibition_model(x, r_max, r_min, ic50):
 
 
 ### Fitting functions for DB objects:
-def fit_luminance_vs_time(data: dict, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1):
+def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1) -> Data3D:
     """
     Fit y = β0 + β1·x with scikit-learn, returning slope & intercept
     in a data-dict that mirrors the original structure.
 
     Parameters
     ----------
-    data : dict
-        Dictionary in "kinetics" format (see htbam_db_api.py).
+    data : Data4D
+        Data object in Data4D format (see htbam_db_api.data).
     min_pts : int, optional
         Minimum number of (x, y) pairs required for a fit
         (default 2).
@@ -76,34 +78,35 @@ def fit_luminance_vs_time(data: dict, *, min_pts: int = 2, start_timepoint: int 
 
     Returns
     -------
-    result : dict
-        New data dictionary with
-        result["dep_vars"]["slope"]      – slope array
-        result["dep_vars"]["intercept"]  – intercept array
-        plus a shallow copy of  data["indep_vars"]  for context.
+    result : Data3D
+        Data object with dep_var of shape (n_conc, n_chamb, 3) containing:
+    - slope
+    - intercept
+    - r_squared
     """
     start = time.time()
     
-    data_type = data['data_type']
-    assert data_type == 'RFU_data', f"Data type {data_type} not supported. Requires 'RFU_data' format."
+    assert type(data) == Data4D, f"Data type {type(data)} not supported. Requires 'Data4D' format."
     
-    indep = data["indep_vars"]
-    dep   = data["dep_vars"]
+    indep = data.indep_vars  # (n_conc, n_time)
+    dep   = data.dep_var
 
     x = "time"
-    y = "luminance"
+    y = "concentration"
 
-    if y not in dep:
-        raise KeyError(f"'{y}' not in data['dep_vars']")
-    if x not in indep:
-        raise KeyError(f"'{x}' not in data['indep_vars']")
+    if y not in data.dep_var_type:
+        raise KeyError(f"'{y}' not in data.dep_var_type.")
+    # if x not in data.indep_vars:
+    #     raise KeyError(f"'{x}' not in data.indep_vars.")
 
-    Y = dep[y]                                # (n_conc , n_time , n_chamb)
+    y_idx = data.dep_var_type.index(y)
+
+    Y = dep[..., y_idx]                              # (n_conc , n_time , n_chamb)
 
     n_conc, n_time, n_chamb = Y.shape
     model = LinearRegression()
 
-    T = indep["time"]                      # (n_conc , n_time)
+    T = indep.time                      # (n_conc , n_time)
     slope     = np.full((n_conc, n_chamb), np.nan, dtype=float)
     intercept = np.full_like(slope, np.nan)
     r_squared = np.full_like(slope, np.nan)
@@ -137,45 +140,30 @@ def fit_luminance_vs_time(data: dict, *, min_pts: int = 2, start_timepoint: int 
         slope[i,     good_chamb] = model.coef_[:, 0]     # (K_good,)
         r_squared[i, good_chamb] = model.score(Xi_c, y_good_c)  # R² for each chamber
 
-    indep_out = {
-        "concentration": indep["concentration"],
-        "chamber_IDs"  : indep["chamber_IDs"],
-        "sample_IDs"   : indep["sample_IDs"],
-    }
+    output_data = Data3D(
+        indep_vars=deepcopy(data.indep_vars),
+        dep_var=np.stack((slope, intercept, r_squared), axis=-1),  # (n_conc, n_chamb, 3)
+        dep_var_type=["slope", "intercept", "r_squared"],
+        meta=data.meta
+    )
+    n_conc = indep.time.shape[0]  # number of concentrations
+    n_chamb = indep.chamber_IDs.shape[0]  # number of chambers
 
     elapsed = time.time() - start
     print(f'Fit slopes for {n_chamb} wells at {n_conc} concentrations.')
     print('Elapsed', np.round(elapsed, 3), 'seconds.')
 
-    # assemble result dict (shallow copy of independents for context)
-    result = {
-        'data_type': 'linear_fit_data',
-        "indep_vars": deepcopy(indep_out),
-        "dep_vars"  : {
-            "slope"     : slope,    # (n_conc, n_chamb)
-            "intercept" : intercept,# (n_conc, n_chamb)
-            "r_squared" : r_squared,# (n_conc, n_chamb)
-        },
-        "meta": {
-            "fit" : f"{y}_vs_{x}",
-            "model": "LinearRegression",
-        }
-    }
-    return result
+    return output_data
 
-def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: int = -1):
+def fit_luminance_vs_concentration(data: Data4D, *, min_pts: int = 2, timepoint: int = -1) -> Data2D:
     """
     Fit y = β0 + β1·x with scikit-learn, returning slope & intercept
     in a data-dict that mirrors the original structure.
 
     Parameters
     ----------
-    data : dict
-        Dictionary in "RFU_data" format (see htbam_db_api.py).
-    x : {"concentration", "time"}
-        Which independent variable to use.
-    y : key in  data["dep_vars"]
-        Name of the dependent variable to fit.
+    data : Data4D
+        Dictionary in "Data4D" format (see htbam_db_api.data).
     min_pts : int, optional
         Minimum number of (x, y) pairs required for a fit
         (default 2).
@@ -184,35 +172,35 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
 
     Returns
     -------
-    result : dict
-        New data dictionary with
-        result["dep_vars"]["slope"]      – slope array
-        result["dep_vars"]["intercept"]  – intercept array
-        plus a shallow copy of  data["indep_vars"]  for context.
+    Data2D: data object with dep_var of shape (n_chamb, 3) containing:
+    - slope
+    - intercept
+    - r_squared
     """
     start = time.time()
-    data_type = data['data_type']
-    assert data_type == 'RFU_data', f"Data type {data_type} not supported. Requires 'RFU_data' format."
 
-    indep = data["indep_vars"]
-    dep   = data["dep_vars"]
+    assert type(data) is Data4D, "Data must be in RFU_data format Data4D."
+
+    indep = data.indep_vars.concentration  # (n_conc,)
+    dep   = data.dep_var
 
     x_label = "concentration"
     y_label = "luminance"
 
-    if y_label not in dep:
-        raise KeyError(f"'{y_label}' not in data['dep_vars']")
-    if x_label not in indep:
-        raise KeyError(f"'{x_label}' not in data['indep_vars']")
+    # Check if the labels are in the data
+    if y_label not in data.dep_var_type:
+        raise KeyError(f"'{y_label}' not in data.dep_var_type.")
 
-    Y = dep[y_label]                                # (n_conc , n_time , n_chamb)
+    y_idx = data.dep_var_type.index(y_label)
+
+    Y = dep[..., y_idx]                              # (n_conc , n_time , n_chamb)
     Yi = Y[:, timepoint, :]                          # shape (n_conc , n_chamb)
 
     n_conc, n_time, n_chamb = Y.shape
     model = LinearRegression()
     
-    X_vec = indep[x_label]        # (n_conc,)
-    X_all = X_vec.reshape(-1, 1)          # (n_conc, 1)
+    X_vec = indep        # (n_conc,)
+    X_all = X_vec.reshape(-1, 1)     # (n_conc, 1)
     # slope/intercept per (time , chamber)
     slope     = np.full((n_chamb), np.nan, dtype=float)
     intercept = np.full_like(slope, np.nan)
@@ -237,42 +225,30 @@ def fit_luminance_vs_concentration(data: dict, *, min_pts: int = 2, timepoint: i
     print(f'Fit slopes for {n_chamb} wells.')
     print('Elapsed', np.round(elapsed, 3), 'seconds.')
 
-    # axes for context
-    indep_out = {
-        "time"       : indep["time"],      # (n_conc , n_time)
-        "chamber_IDs": indep["chamber_IDs"],
-        "sample_IDs" : indep["sample_IDs"]
-    }
+    output_data = Data2D(
+        indep_vars=data.indep_vars,
+        dep_var=np.stack((slope, intercept, r_squared), axis=-1),  # (n_chamb, 3)
+        dep_var_type=["slope", "intercept", "r_squared"],
+        meta=data.meta
+    )
 
-    # assemble result dict (shallow copy of independents for context)
-    result = {
-        'data_type': 'linear_fit_data', # Is this the correct format for linear_fit_data? Dimensions are different I think.
-        "indep_vars": deepcopy(indep_out),
-        "dep_vars"  : {
-            "slope"     : slope,     # (n_chamb,)
-            "intercept" : intercept, # (n_chamb,)
-            "r_squared" : r_squared, # (n_chamb,)
-        },
-        "meta": {
-            "fit" : f"{y_label}_vs_{x_label}",
-            "model": "LinearRegression",
-        }
-    }
-    return result
+    return output_data
 
-def fit_initial_rates_vs_concentration_with_function(data: dict,
-                                  model_func: callable,
-                                  *,
-                                  min_pts: int = 2,
-                                  bounds: tuple = (-np.inf, np.inf),
-                                  maxfev: int = 10000,
-                                  p0: List[float] = None):
+def fit_initial_rates_vs_concentration_with_function(
+    data: Data3D,
+    model_func: callable,
+    *,
+    min_pts: int = 2,
+    bounds: tuple = (-np.inf, np.inf),
+    maxfev: int = 10000,
+    p0: List[float] = None
+) -> Tuple[Data2D, Data3D]:
     """
     Fit a user-defined nonlinear function to initial rates vs substrate concentrations.
     Parameters
     ----------
-    data : dict
-        Dictionary in "RFU_data" format (see htbam_db_api.py).
+    data : Data3D
+        Data object with fit initial rates.
     model_func : callable
         Callable of the form model_func(x, *params) -> y. The first argument is x,
         followed by N parameters to fit. For example:
@@ -291,113 +267,60 @@ def fit_initial_rates_vs_concentration_with_function(data: dict,
         Must have length = number of parameters in model_func (i.e. signature minus 1).
     Returns
     -------
-    result : dict
-        New data dictionary with
-        result["dep_vars"]["fit_params"]  – list of fitted parameter arrays (length n_chambers, N_params, )
-        result["meta"]["model"]       – string describing the model used
-        result["meta"]["parameters"] – list of parameter names
-        plus a shallow copy of  data["indep_vars"]  for context.
+    Data2D: data object with dep_var of shape (n_chamb, N_params + 1) containing:
+    - fitted parameters (N_params)
+    - R² values (r_squared)
+    Data3D: data object with dep_var of shape (n_conc, n_chamb, 1) containing:
+    - predicted y values (y_pred)
     """
-
+    assert isinstance(data, Data3D), "data must be Data3D."
     start = time.time()
-    data_type = data['data_type']
-    assert data_type in ("linear_fit_data", "linear_fit_data_mask"), f"Data type {data_type} not supported. Requires 'linear_fit_data' or 'linear_fit_data_mask' format."
+    # extract substrate concentrations and initial rates
+    X = data.indep_vars.concentration                 # (n_conc,)
+    slope_idx = data.dep_var_type.index("slope")
+    Y = data.dep_var[..., slope_idx]                  # (n_conc, n_chamb)
 
-    indep = data["indep_vars"]
-    dep   = data["dep_vars"]
+    # perform fits
+    results = fit_nonlinear_models(
+        X,
+        Y,
+        model_func,
+        p0=p0 or [1.0] * (len(inspect.signature(model_func).parameters) - 1),
+        bounds=bounds,
+        maxfev=maxfev
+    )
+    params = results["params"]            # (n_chamb, N_params)
+    y_pred = results["y_pred"]            # (n_conc, n_chamb)
+    r2 = results["r_squared"]             # (n_chamb,)
 
-    x_label = "concentration"
-    y_label = "slope"
+    num_successful_fits = np.sum(~np.isnan(params).any(axis=1))
+    print(f'Successfully fit nonlinear model for {num_successful_fits} wells.')
+    print('Elapsed', np.round(time.time() - start, 3), 'seconds.')
 
-    if y_label not in dep:
-        raise KeyError(f"'{y_label}' not in data['dep_vars']")
-    if x_label not in indep:
-        raise KeyError(f"'{x_label}' not in data['indep_vars']")
-
-    Y = dep[y_label]                                # (n_conc, n_chamb)
-
-    n_conc, n_chamb = Y.shape
-    model = LinearRegression()
-    
-    X_vec = indep[x_label]        # (n_conc,)
-    #X_all = X_vec.reshape(-1, 1)          # (n_conc, 1)
-
-    curve_fit_results_dict = fit_nonlinear_models(
-        X_vec, 
-        Y, 
-        model_func, 
-        p0=None, 
-        bounds=(-np.inf, np.inf), 
-        maxfev=10000
+    # 1) build Data2D of params + R²
+    param_names = list(inspect.signature(model_func).parameters.keys())[1:]
+    dep2d = np.concatenate([params, r2[:,None]], axis=1)  # (n_chamb, Np+1)
+    names2d = param_names + ["r_squared"]
+    meta2d  = Meta(fit_type=model_func.__name__,)
+    params_data = Data2D(
+        indep_vars=deepcopy(data.indep_vars),
+        dep_var=dep2d,
+        dep_var_type=names2d,
+        meta=meta2d
     )
 
-    elapsed = time.time() - start
+    # 2) build Data3D of predictions
+    n_conc, n_chamb = y_pred.shape
+    pred3d = y_pred.reshape(n_conc, n_chamb, 1)  # (n_conc, n_chamb, 1)
+    meta3d = Meta(fit_type=model_func.__name__)
+    ypred_data = Data3D(
+        indep_vars=deepcopy(data.indep_vars),
+        dep_var=pred3d,
+        dep_var_type=["y_pred"],
+        meta=meta3d
+    )
 
-    num_successful_fits = np.sum(~np.isnan(curve_fit_results_dict["params"]).any(axis=1))
-    print(f'Successfully fit nonlinear model for {num_successful_fits} wells.')
-    print('Elapsed', np.round(elapsed, 3), 'seconds.')
-
-    # # axes for context
-    # indep_out = {
-    #     "chamber_IDs": indep["chamber_IDs"],
-    #     "sample_IDs" : indep["sample_IDs"]
-    # }
-
-    # assemble result dict (shallow copy of independents for context)
-    result = {
-        'data_type': 'linear_fit_data', # Is this the correct format for linear_fit_data? Dimensions are different I think.
-        "indep_vars": deepcopy(indep),
-        "dep_vars"  : {
-            "fit_params" : curve_fit_results_dict["params"],  # (n_chamb, N_params)
-            "covariances": curve_fit_results_dict["covariances"],  # (n_chamb, N_params, N_params)
-            "y_pred"     : curve_fit_results_dict["y_pred"],  # (n_conc, n_chamb)
-            "r_squared"  : curve_fit_results_dict["r_squared"],  # (n_chamb,)
-        },
-        "meta": {
-            "fit" : f"{y_label}_vs_{x_label}",
-            "model": model_func.__name__,
-            "parameters": list(inspect.signature(model_func).parameters.keys())[1:],  # skip the first 'x' argument
-        }
-    }
-    return result
-                            
-def transform_data(data: dict, apply_to: str, store_as: str, function: callable, flatten: bool = False, data_type: str = None) -> dict:
-    """
-    Transform a data dictionary by applying a function to the specified dependent variable.
-
-    TODO: Currently, this uses a single lambda to apply to all values. Would be nice to pass in a matrix or something too, so we can divide all chamber values by standard curve slope, for example.
-    Parameters
-    ----------
-    data : dict
-        Dictionary in "RFU_data" format (see htbam_db_api.py).
-    apply_to : str
-        Key in data["dep_vars"] to apply the function to.
-    store_as : str
-        Key in data["dep_vars"] to store the transformed variable.
-    function : callable
-        Function to apply to the dependent variable.
-    flatten : bool, optional
-        If True, flatten the output array (default False).
-
-    Returns
-    -------
-    result : dict
-        New data dictionary with transformed dependent variable.
-    """
-    if apply_to not in data["dep_vars"]:
-        raise KeyError(f"'{apply_to}' not in data['dep_vars']")
-
-    transformed_data = deepcopy(data)
-    transformed_data["dep_vars"][store_as] = function(transformed_data["dep_vars"][apply_to])
-    transformed_data.pop(apply_to, None)  # Remove the original variable if needed
-
-    if flatten:
-        transformed_data["dep_vars"][apply_to] = transformed_data["dep_vars"][apply_to].flatten()
-
-    if data_type is not None:
-        transformed_data["data_type"] = data_type
-
-    return transformed_data
+    return params_data, ypred_data
 
 ### Generalized fitting function:
 def fit_nonlinear_models(
