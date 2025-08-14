@@ -97,7 +97,9 @@ class HTBAMExperiment:
             return ax
         plot_chip(slopes_to_plot, chamber_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
 
-    def fit_initial_rates(self, run_name: str, 
+    ### This is a WIP update to the fitting function, but probably won't
+    # be released before the refactor update.
+    def fit_initial_rates_new(self, run_name: str, 
                           standard_run_name: str, 
                           substrate_conc: float = None,
                           max_rxn_perc: int = 15,
@@ -150,7 +152,125 @@ class HTBAMExperiment:
             substrate_concs = self._run_data[run_name]["conc_data"]
         else:
             substrate_concs = np.array([substrate_conc for _ in range(conc_dim)])
-        #print(substrate_concs)
+        
+        product_thresholds = substrate_concs * max_rxn_perc / 100
+        product_thresholds = product_thresholds[:, np.newaxis]
+        two_point_fits = 0
+
+        time_series_matrix = self._run_data[run_name]["time_data"]  # shape: (time, conc)
+        assert time_series_matrix.ndim == 2, "Expected time_data as (time, conc)"
+        assert time_series_matrix.shape[1] == len(self._run_data[run_name]["conc_data"]), \
+            "time_data conc axis must match conc_data length"
+
+        for i, chamber_idx in tqdm(list(enumerate(self._run_data[run_name]["chamber_idxs"]))):
+            # product_concentration for this chamber: (time, chamber, conc) -> select chamber -> (time, conc) -> T to (conc, time)
+            product_conc_array = self._run_data[run_name]["product_concentration"][:, i, :].T  # (conc, time)
+
+            # Trim off the first N timepoints along the time axis
+            t0 = starting_timepoint_index
+            product_conc_trim = product_conc_array[:, t0:]           # (conc, time_trim)
+            time_trim_matrix = time_series_matrix[t0:, :]            # (time_trim, conc)
+
+            # Re-zero each concentration at its first kept timepoint
+            zeroed = product_conc_trim - product_conc_trim[:, 0][:, np.newaxis]  # (conc, time_trim)
+            
+            # Threshold & time masks, shaped (conc, time_trim)
+            #print('product thresh', product_thresholds)
+            rxn_threshold_mask_trim = (zeroed < product_thresholds)  # product_thresholds is (conc, 1)
+            time_allowed_mask_trim = (time_trim_matrix < max_rxn_time).T  # (conc, time_trim)
+
+            rxn_threshold_mask_trim &= time_allowed_mask_trim
+
+            # Prepare outputs
+            slopes = np.zeros_like(self._run_data[run_name]["conc_data"], dtype=float)
+            intercepts = np.zeros_like(self._run_data[run_name]["conc_data"], dtype=float)
+            scores = np.zeros_like(self._run_data[run_name]["conc_data"], dtype=float)
+
+            # Fit per concentration using that column's time vector
+            for j in range(product_conc_trim.shape[0]):  # j indexes concentration
+                mask_j = rxn_threshold_mask_trim[j]      # (time_trim,)
+                if mask_j.sum() < 2:
+                    two_point_fits += 1
+                    continue
+                x = time_trim_matrix[:, j][mask_j].reshape(-1, 1)  # (n_points, 1)
+                y = product_conc_trim[j, mask_j]                   # (n_points,)
+                lin_reg = LinearRegression()
+                lin_reg.fit(x, y)
+                slopes[j] = float(lin_reg.coef_.ravel()[0])
+                intercepts[j] = float(lin_reg.intercept_)
+                scores[j] = float(lin_reg.score(x, y))
+
+            # Store a full-length (conc, time) mask aligned to original time axis (first N points are False)
+            full_mask = np.zeros((product_conc_array.shape[0], product_conc_array.shape[1]), dtype=bool)
+            full_mask[:, t0:] = rxn_threshold_mask_trim
+
+            results_dict = {
+                'slopes': slopes,
+                'intercepts': intercepts,
+                'r_values': scores,
+                'mask': full_mask,
+                'starting_timepoint_index': starting_timepoint_index
+            }
+            self._db_conn.add_analysis(run_name, 'linear_regression', chamber_idx, results_dict)
+        
+        print(f'{two_point_fits} reactions had less than 2 points for fitting')
+    
+
+    def fit_initial_rates(self, run_name: str, 
+                          standard_run_name: str, 
+                          substrate_conc: float = None,
+                          max_rxn_perc: int = 15,
+                          starting_timepoint_index: int = 0,
+                          min_rxn_time = -1,
+                          max_rxn_time = np.inf):
+        '''
+        Fits a standard curve to the data in the given run.
+        Input:
+            run_name (str): the name of the run to be analyzed.
+        Output:
+            None
+        '''
+        if run_name not in self._run_data.keys():
+            print("Existing run data not found. Fetching from database.")
+            chamber_idxs, luminance_data, conc_data, time_data = self._db_conn.get_run_assay_data(run_name)
+            self._run_data[run_name] = {'chamber_idxs': chamber_idxs, 
+                                        'luminance_data': luminance_data, 
+                                        'conc_data': conc_data, 
+                                        'time_data': time_data}
+
+        print(f"Activity data found for run \"{run_name}\" with:")
+        luminance_shape = self._run_data[run_name]['luminance_data'].shape
+        print(f"\t-- {luminance_shape[0]} time points.\n\t-- {luminance_shape[1]} chambers.\n\t-- {luminance_shape[2]} concentrations.")
+
+        if standard_run_name not in self._run_data.keys():
+            raise ValueError(f"Standard curve data not found for run \"{standard_run_name}\". Please fit the standard curve first.")
+        
+        print(f"Using standard curve data from run \"{standard_run_name}\" to convert luminance data to concentration data.")
+
+        std_slopes = np.array(list(self._db_conn.get_analysis(standard_run_name, 'linear_regression', 'slope').values()))
+
+        #calculate product concentration by dividing every chamber intensity by the slope of the standard curve for that chamber
+        self._run_data[run_name]["product_concentration"] = self._run_data[run_name]["luminance_data"] / std_slopes[np.newaxis, :, np.newaxis]
+
+        chamber_dim = len(self._run_data[run_name]["chamber_idxs"])
+        conc_dim = len(self._run_data[run_name]["conc_data"])
+        time_dim = len(self._run_data[run_name]["time_data"])
+
+        arr = np.empty((chamber_dim, conc_dim))
+        arr[:] = np.nan
+            
+        #make an array of initial slopes for each chamber: should be (#chambers , #concentrations) = (1792 x 11)
+        # initial_slopes = arr.copy()
+        # initial_slopes_R2 = arr.copy()
+        # initial_slopes_intercepts = arr.copy()
+        # reg_idx_arr = np.zeros((chamber_dim, conc_dim, time_dim)).astype(bool)
+
+        time_series = self._run_data[run_name]["time_data"]#[:,0][:, np.newaxis]
+        if substrate_conc is None:
+            substrate_concs = self._run_data[run_name]["conc_data"]
+        else:
+            substrate_concs = np.array([substrate_conc for _ in range(conc_dim)])
+        print(time_series.shape)
         product_thresholds = substrate_concs * max_rxn_perc / 100
         product_thresholds = product_thresholds[:, np.newaxis]
         two_point_fits = 0 
@@ -166,8 +286,9 @@ class HTBAMExperiment:
             
             rxn_threshold_mask = zeroed_product_conc_array < product_thresholds
             
-            time_allowed_mask = time_series < max_rxn_time
-            
+            time_allowed_mask = time_series >= min_rxn_time
+            time_allowed_mask = np.logical_and(time_allowed_mask, time_series < max_rxn_time)
+
             rxn_threshold_mask[:,:starting_timepoint_index] = 0
 
             rxn_threshold_mask = np.logical_and(rxn_threshold_mask, time_allowed_mask.T)
@@ -190,7 +311,10 @@ class HTBAMExperiment:
                     slopes[j] = slope
                     intercepts[j] = intercept
                     scores[j] = score
-            results_dict = {'slopes': slopes, 'intercepts': intercepts, 'r_values': scores,  'mask': rxn_threshold_mask}
+            results_dict = {'slopes': slopes, 
+                            'intercepts': intercepts, 
+                            'r_values': scores,  
+                            'mask': rxn_threshold_mask}
             
             self._db_conn.add_analysis(run_name, 'linear_regression', chamber_idx, results_dict)
             # initial_slopes[i] = slopes
@@ -250,6 +374,8 @@ class HTBAMExperiment:
         return
 
     def plot_initial_rates_chip(self, run_name: str, time_to_plot=0.3, subtract_zeroth_point=False):
+        
+        ''' Subtract zeroth point has been unimplemented'''
 
         initial_rates_dict = self._db_conn.get_analysis(run_name, 'linear_regression', 'slopes')
 
@@ -263,8 +389,7 @@ class HTBAMExperiment:
 
 
         chamber_names_dict = self._db_conn.get_chamber_name_dict()
-
-
+        
         #plotting function: We'll generate a subplot for each chamber, showing the raw data and the linear regression line.
         # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
         def plot_chamber_initial_rates(chamber_id, ax, time_to_plot=time_to_plot):
@@ -272,15 +397,13 @@ class HTBAMExperiment:
             
             #convert from 'x,y' to integer index in the array:
             data_index = list(self._run_data[run_name]["chamber_idxs"]).index(chamber_id)
-            x_data = self._run_data[run_name]["time_data"][:,0]
+            x_data = self._run_data[run_name]["time_data"]
             y_data = self._run_data[run_name]["product_concentration"][:,data_index,:].T
-            
+
             #plot only first X% of time:
             max_time = np.nanmax(x_data)
             time_to_plot = max_time*time_to_plot
-            time_idxs_to_plot = x_data < time_to_plot
-            x_data = x_data[time_idxs_to_plot]
-            y_data = y_data[:, time_idxs_to_plot]
+            time_idxs_to_plot = np.sum(x_data < time_to_plot, axis=0) # The index to plot to, per sub conc.
             
             # TODO: add option to subtract zeroth point(s) from all points
             #get slope from the analysis:
@@ -291,25 +414,24 @@ class HTBAMExperiment:
             current_chamber_reg_mask = initial_rate_masks_arr[data_index,:][:,:len(x_data)]
             
             colors = sns.color_palette('husl', n_colors=y_data.shape[0])
-
+            
             for i in range(y_data.shape[0]): #over each concentration:
                 
-                if subtract_zeroth_point:
-                    try:
-                        ax.scatter(x_data, y_data[i,:] - y_data[i,0], color=colors[i], alpha=0.3)
-                        ax.scatter(x_data[current_chamber_reg_mask[i]],
-                                   y_data[i, current_chamber_reg_mask[i]] - y_data[i, current_chamber_reg_mask[i]][0], color=colors[i], alpha=1, s=50, label=f'{self._run_data[run_name]["conc_data"][i]}')
-                    except:
-                        pass
-                else:
-                    ax.scatter(x_data, y_data[i,:], color=colors[i], alpha=0.3)
-                    ax.scatter(x_data[current_chamber_reg_mask[i]], y_data[i, current_chamber_reg_mask[i]], color=colors[i], alpha=1, s=50, label=f'{self._run_data[run_name]["conc_data"][i]}')
+                # shorthand
+                titp = time_idxs_to_plot
+                
+                ax.scatter(x_data[:titp[i], i], 
+                            y_data[i,:titp[i]], color=colors[i], alpha=0.3)
+                ax.scatter(x_data[:titp[i], i][current_chamber_reg_mask[i, :titp[i]]],
+                            y_data[i, :titp[i]][current_chamber_reg_mask[i, :titp[i]]], color=colors[i], alpha=1, s=50, label=f'{self._run_data[run_name]["conc_data"][i]}')
 
                 m = current_chamber_slopes[i]
-                b = current_chamber_intercepts[i] if not subtract_zeroth_point else 0
+                b = current_chamber_intercepts[i]
+
                 if not (np.isnan(m) or np.isnan(b)):
+                    pass
                     #return False, no_update, no_update
-                    ax.plot(x_data, m*np.array(x_data) + b, color=colors[i])
+                    ax.plot(x_data[:titp[i], i], m*np.array(x_data[:titp[i], i]) + b, color=colors[i])
             ax.legend()
             return ax
 
