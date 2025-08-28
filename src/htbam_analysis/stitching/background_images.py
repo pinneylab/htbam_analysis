@@ -121,6 +121,7 @@ class BackgroundImages:
             lambda f: (channel in f)
             and ("StitchedImage" in f or "StitchedImg" in f)
             and not ("BGSubtracted" in f)
+            and not (f.startswith("._"))
         )
 
         parse = lambda f: tuple(f.split(".")[0].split("_")[1:3] + [".".join(f.split(".")[0].split("_")[3:])])
