@@ -13,6 +13,37 @@ from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
 # Initial rate R2 threshhold
 # Initial rate positive slope threshhold
 
+def make_custom_mask (data, mask, info=""):
+    '''
+    Apply a custom mask to data.
+    Inputs:
+        data: DataND (dep var shape: (..., n_dep_vars)) containing the data to be masked
+        mask: DataND (dep var shape: (n_conc, n_chambers, 1)) containing the boolean mask
+    Returns:
+        output_data: a DataND with a boolean mask applied to the dep_var
+    '''
+    
+    assert type(data) in [Data4D, Data3D, Data2D], "data must be of type Data4D, Data3D, or Data2D."
+    
+    dtype = type(data)
+    
+    # Check that the shapes are compatible:
+    assert data.dep_var.shape[0:2] == mask.shape[0:2], "data and mask must have the same number of concentrations and chambers."
+    
+    # Turn into db object:
+    metadata = Meta(
+        mask_type = 'custom',
+        #mask_info = info,
+    )
+    output_data = dtype(
+        indep_vars=data.indep_vars,
+        dep_var=mask,
+        dep_var_type=["mask"],
+        meta=metadata
+    )
+    
+    return output_data
+
 def filter_initial_rates_r2_cutoff(initial_rate_data, r2_cutoff):
     '''
     Filter initial rates data.

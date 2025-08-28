@@ -75,26 +75,40 @@ class HTBAMExperiment:
     ### MASKING ###
     def apply_mask(self, run_name: str, dep_variables: list, save_as: str, mask_names: list):
         """
-        Applies boolean masks (DataND) to specified dependent vars in a Data3D run.
+        Applies boolean masks (DataND) to specified dependent vars in a Data3D/4D run.
         """
         run_data = self.get_run(run_name)
-
         dtype = type(run_data)
 
-        # combine all masks
+        # target shape for mask (all axes except dep-var axis)
+        target_shape = run_data.dep_var.shape[:-1]  # e.g., (n_conc, n_time, n_chambers) or (n_conc, n_chambers)
+
+        # combine all masks into a single boolean array shaped like target_shape
         combined = None
         for m in mask_names:
             current_mask = self.get_run(m)
             assert current_mask.dep_var_type == ["mask"], "mask must be DataND with dep_var_type ['mask']"
-            mat = current_mask.dep_var[..., 0]               # (n_conc, n_chambers)
+            mat = current_mask.dep_var[..., 0].astype(bool)  # drop mask channel, ensure bool
+
+            # # Make mask broadcastable to data shape:
+            # if mat.shape == target_shape:
+            #     pass
+            # elif len(target_shape) == 3 and mat.shape == (target_shape[0], target_shape[2]):
+            #     # mask lacks time axis -> expand over time
+            #     mat = np.broadcast_to(mat[:, None, :], target_shape)
+            # else:
+            #     raise ValueError(f"Incompatible mask shape {mat.shape} for data shape {target_shape}")
+
             combined = mat if combined is None else (combined & mat)
-        #combined3 = np.expand_dims(combined, -1)    # (n_conc, n_chambers, 1)
+
+        # IMPORTANT: upcast to float so NaN is representable
+        new_dep_var = run_data.dep_var.astype(float, copy=True)
 
         # mask each requested dep var
-        new_dep_var = np.copy(run_data.dep_var)
         for dv in dep_variables:
             idx = run_data.dep_var_type.index(dv)
             new_dep_var[..., idx] = np.where(combined, new_dep_var[..., idx], np.nan)
+
         meta = Meta(
             based_on=[run_name] + mask_names,
             applied_masks=mask_names,
@@ -318,6 +332,80 @@ class HTBAMExperiment:
                   graphing_function=plot_rates_vs_conc,
                   title="Initial Rates vs Concentration")
 
+    def plot_MM_chip(self,
+                    analysis_name: str,
+                    model_fit_name: str,
+                    model_pred_data_name: str = None,
+                    x_log: bool = False,
+                    y_log: bool = False):
+        """
+        Plot MM values, with inset initial rates vs substrate concentration for each chamber.
+        Optionally overlay fitted curve from `model_pred_data_name` and
+        annotate fit parameters from `model_fit_name`.
+        """
+        analysis: Data3D = self.get_run(analysis_name)
+        si = analysis.dep_var_type.index("slope")
+        slopes = analysis.dep_var[..., si]               # (n_conc, n_chambers)
+        conc   = analysis.indep_vars.concentration       # (n_conc,)
+
+        mf_fit: Data2D = self.get_run(model_fit_name)
+        fit_types = mf_fit.dep_var_type           # e.g. ["v_max","K_m","r_squared"]
+        fit_vals = mf_fit.dep_var                # shape (n_chamb, len(fit_types))
+
+        mm_idx = mf_fit.dep_var_type.index("v_max")
+        mms = mf_fit.dep_var[..., mm_idx]    # (n_chambers,)
+
+        if model_pred_data_name:
+            mf_pred: Data3D = self.get_run(model_pred_data_name)
+            yi = mf_pred.dep_var_type.index("y_pred")
+            preds = mf_pred.dep_var[..., yi]           # (n_conc, n_chambers)
+
+        chambers = analysis.indep_vars.chamber_IDs        # (n_chambers,)
+        samples  = analysis.indep_vars.sample_IDs         # (n_chambers,)
+        sample_names = {cid: samples[i] for i, cid in enumerate(chambers)}
+        #mean_rates   = {cid: np.nanmean(slopes[:, i]) for i, cid in enumerate(chambers)}
+        mms_to_plot = {cid: mms[i] for i, cid in enumerate(chambers)}
+
+        def plot_rates_vs_conc(cid, ax):
+            idx = (chambers == cid)
+            x   = conc
+            y   = slopes[:, idx].flatten()
+            ax.scatter(x, y, alpha=0.7, label="current well")
+
+            if model_pred_data_name:
+                # show envelope of model fits for all wells with this sample
+                sample = sample_names[cid]
+                same_idxs = [i for i, s in enumerate(samples) if s == sample]
+                y_all = preds[:, same_idxs]               # (n_conc, n_same)
+                y_min = np.nanmin(y_all, axis=1)
+                y_max = np.nanmax(y_all, axis=1)
+                ax.fill_between(x, y_min, y_max, color="gray", alpha=0.3, label='other well fits')
+                # then overplot this chamber’s model fit
+                y_p = preds[:, idx].flatten()
+                ax.plot(x, y_p, color="red", label="current well fit")
+
+            if model_fit_name:
+                # extract this chamber's fit row
+                chamb_idx = np.where(chambers == cid)[0][0]
+                vals = fit_vals[chamb_idx]
+                txt = "".join(f"{nm}={v:.2f}\n" for nm,v in zip(fit_types, vals))
+                ax.text(0.05, 0.95, txt, transform=ax.transAxes,
+                        va="top", fontsize=8, bbox=dict(boxstyle="round", fc="white", alpha=0.7))
+            
+            if model_pred_data_name or model_fit_name:
+                ax.legend()
+            ax.set_title(f"{cid}: {sample_names[cid]}")
+            ax.set_xlabel("Concentration")
+            ax.set_ylabel("Initial Rate")
+            if x_log: ax.set_xscale("log")
+            if y_log: ax.set_yscale("log")
+            return ax
+
+        plot_chip(mms_to_plot, sample_names,
+                  graphing_function=plot_rates_vs_conc,
+                  title="Initial Rates vs Concentration")
+        
+    
     def plot_ic50_chip(self,
                     analysis_name: str,
                     model_fit_name: str,
