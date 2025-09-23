@@ -59,7 +59,8 @@ def inhibition_model(x, r_max, r_min, ic50):
 
 
 ### Fitting functions for DB objects:
-def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1) -> Data3D:
+def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1,
+                              fit_windows_per_concentration: dict = None) -> Data3D:
     """
     Fit y = β0 + β1·x with scikit-learn, returning slope & intercept
     in a data-dict that mirrors the original structure.
@@ -75,6 +76,9 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
         First timepoint to include in the fit (default 0).
     end_timepoint : int, optional
         Last timepoint to include in the fit (default -1, i.e. all points).
+    fit_windows_per_concentration : dict, optional
+        Dictionary mapping concentration values to (start, end) timepoint tuples.
+        If provided, these override start_timepoint and end_timepoint for each concentration.
 
     Returns
     -------
@@ -111,13 +115,45 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
     intercept = np.full_like(slope, np.nan)
     r_squared = np.full_like(slope, np.nan)
 
-    # What subset of points are we fitting on?
-    RFU_for_fitting = Y[:, start_timepoint:end_timepoint, :]  # skip the first couple points, because we get weird values
-    time_array_for_fitting = T[:, start_timepoint:end_timepoint]  # skip the first couple points, because we get weird values
+    # If user provided per-concentration fit windows, validate them and prepare a mapping
+    concs = np.asarray(indep.concentration)
+    per_conc_windows = None
+    if fit_windows_per_concentration is not None:
+        if not isinstance(fit_windows_per_concentration, dict):
+            raise TypeError("fit_windows_per_concentration must be a dict mapping concentration -> (start, end)")
+
+        # Ensure every concentration in data has an entry in the provided dict
+        missing = [float(c) for c in concs if float(c) not in map(float, fit_windows_per_concentration.keys())]
+        if len(missing) > 0:
+            raise KeyError(f"fit_windows_per_concentration missing windows for concentrations: {missing}")
+
+        # Normalize and validate windows
+        per_conc_windows = {}
+        for k, v in fit_windows_per_concentration.items():
+            try:
+                kf = float(k)
+            except Exception:
+                raise KeyError(f"Invalid concentration key: {k}")
+            if not (isinstance(v, (list, tuple)) and len(v) == 2):
+                raise ValueError(f"Window for concentration {k} must be a (start, end) tuple")
+            s, e = int(v[0]), int(v[1])
+            per_conc_windows[float(kf)] = (s, e)
+
+    # What subset of points are we fitting on? If per-concentration windows provided, we'll slice inside the loop.
+    if per_conc_windows is None:
+        RFU_for_fitting = Y[:, start_timepoint:end_timepoint, :]  # skip the first couple points, because we get weird values
+        time_array_for_fitting = T[:, start_timepoint:end_timepoint]  # skip the first couple points, because we get weird values
 
     for i in range(n_conc):
-        Xi = time_array_for_fitting[i].reshape(-1, 1)          # (Ti, 1)
-        yi = RFU_for_fitting[i]                          # (Ti, K)
+        # If per-concentration windows were provided, use them for this concentration
+        if per_conc_windows is not None:
+            conc_val = float(concs[i])
+            start_idx, end_idx = per_conc_windows[conc_val]
+            Xi = T[i, start_idx:end_idx].reshape(-1, 1)          # (Ti, 1)
+            yi = Y[i, start_idx:end_idx, :]                      # (Ti, K)
+        else:
+            Xi = time_array_for_fitting[i].reshape(-1, 1)          # (Ti, 1)
+            yi = RFU_for_fitting[i]                          # (Ti, K)
 
         # 1. keep chambers that have *no* NaNs over time
         good_chamb = ~np.isnan(yi).any(axis=0)     # (K,) boolean mask
@@ -445,3 +481,109 @@ def fit_nonlinear_models(
         'y_pred': Y_pred,
         'r_squared': r_squared
     }
+
+
+#
+#fit(my_data: DataND, x_label='concentration', y_label='initial_rate', fit_function: callable)
+def fit_general(
+    data: Data3D,
+    x_label: str,
+    y_label: str,
+    fit_function: callable,
+    *,
+    min_pts: int = 2,
+    bounds: tuple = (-np.inf, np.inf),
+    maxfev: int = 10000,
+    p0: List[float] = None
+) -> Tuple[Data2D, Data3D]:
+    """
+    Fit a user-defined nonlinear function to y vs x.
+
+    Parameters
+    ----------
+    data : Data3D
+        Data object with indep_vars and dep_var.
+    x_label : str
+        Label of the independent variable in indep_vars.
+    y_label : str
+        Label of the dependent variable in dep_var_type.
+    fit_function : callable
+        Callable of the form fit_function(x, *params) -> y. The first argument is x,
+        followed by N parameters to fit. For example:
+
+            def mm_model(x, v_max, K_m):
+                return v_max * x / (K_m + x)
+    min_pts : int, optional
+        Minimum number of (x, y) pairs required for a fit (default 2).
+    bounds : 2-tuple of array-like, optional
+        Lower and upper bounds on parameters, passed to `curve_fit`.
+        Defaults to no bounds (i.e. `(-inf, +inf)`).
+    maxfev : int, optional
+        Maximum number of function evaluations in `curve_fit`. Default is 10000.
+    p0 : sequence or None, optional
+        Initial guess for the fit parameters. If None, defaults to `[1.0]*N_params`.
+        Must have length = number of parameters in fit_function (i.e. signature minus 1).
+
+    Returns
+    -------
+    Data2D: data object with dep_var of shape (n_chamb, N_params + 1) containing:
+    - fitted parameters (N_params)
+    - R² values (r_squared)
+    Data3D: data object with dep_var of shape (n_points, n_chamb, 1) containing:
+    - predicted y values (y_pred)
+    """
+    assert isinstance(data, Data3D), "data must be Data3D."
+    start = time.time()
+    
+    indep = data.indep_vars
+    dep   = data.dep_var
+
+    if x_label not in indep.__dict__:
+        raise KeyError(f"'{x_label}' not in indep_vars.")
+    if y_label not in data.dep_var_type:
+        raise KeyError(f"'{y_label}' not in dep_var_type.")
+
+    x = getattr(indep, x_label)                       # (n_points,)
+    y_idx = data.dep_var_type.index(y_label)
+    y = dep[..., y_idx]                               # (n_points, n_chamb)
+
+    # perform fits
+    results = fit_nonlinear_models(
+        x,
+        y,
+        fit_function,
+        p0=p0 or [1.0] * (len(inspect.signature(fit_function).parameters) - 1),
+        bounds=bounds,
+        maxfev=maxfev
+    )
+    params = results["params"]            # (n_chamb, N_params)
+    y_pred = results["y_pred"]            # (n_points, n_chamb)
+    r2 = results["r_squared"]             # (n_chamb,)
+
+    num_successful_fits = np.sum(~np.isnan(params).any(axis=1))
+    print(f'Successfully fit nonlinear model for {num_successful_fits} wells.')
+    print('Elapsed', np.round(time.time() - start, 3), 'seconds.')
+
+    # 1) build Data2D of params + R²
+    param_names = list(inspect.signature(fit_function).parameters.keys())[1:]
+    dep2d = np.concatenate([params, r2[:,None]], axis=1)  # (n_chamb, Np+1)
+    names2d = param_names + ["r_squared"]
+    meta2d  = Meta(fit_type=fit_function.__name__,)
+    params_data = Data2D(
+        indep_vars=deepcopy(data.indep_vars),
+        dep_var=dep2d,
+        dep_var_type=names2d,
+        meta=meta2d
+    )
+    # 2) build Data3D of predictions
+    n_points, n_chamb = y_pred.shape
+    pred3d = y_pred.reshape(n_points, n_chamb, 1)   
+    meta3d = Meta(fit_type=fit_function.__name__)
+    ypred_data = Data3D(
+        indep_vars=deepcopy(data.indep_vars),
+        dep_var=pred3d,
+        dep_var_type=["y_pred"],
+        meta=meta3d
+    )
+
+    return params_data, ypred_data

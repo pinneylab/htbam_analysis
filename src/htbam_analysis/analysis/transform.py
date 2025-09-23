@@ -46,14 +46,12 @@
 import numpy as np
 from copy import deepcopy
 
-import numpy as np
-from copy import deepcopy
-
-
 def transform_data(
     data_objs: list,        # list of Data2D, Data3D, Data4D instances (all same class and shape)
     expr: str,             # e.g. "(a_luminance - b_luminance)"
-    output_name: str       # name of the new field, e.g. "difference"
+    output_name: str,      # name of the new field, e.g. "difference"
+    expression_vars: dict = None,  # optional mapping of name -> object to be available in expr
+    keep_existing: bool = False,  # if True, keep existing dep_var fields and append/replace the new field
 ):
     """
     Return a new object of the same class as data_objs[0] in which:
@@ -72,6 +70,10 @@ def transform_data(
             expr      = "(a_luminance - b_luminance)",
             output_name = "difference"
         )
+    If `keep_existing` is True, the returned object will retain all original
+    dependent variables from `data_objs[0]` and append (or replace) the
+    transformed variable named `output_name`. If False (default), the returned
+    object contains only the transformed variable.
     """
 
     # 1) Check that at least one object was passed
@@ -97,17 +99,250 @@ def transform_data(
 
     # 3) Build a namespace mapping each prefixed field name → its NumPy array slice
     #    Prefixes: "a_", "b_", "c_", ... up to as many objects as in list
+    #    Also expose single-letter proxies (a, b, ...) that support dot-syntax
+    #    e.g. a.luminance, a.sample.luminance and intercept NumPy functions
     namespace = {}
+
+    class GroupedField:
+        """Wraps a per-chamber array and a sample-ID vector to support grouped
+        reductions. Intercepts NumPy functions via __array_function__ so calls
+        like np.mean(a.sample.luminance) compute the per-sample reduction and
+        map the result back to chambers.
+        """
+        # Ensure NumPy prefers __array_function__ on this object
+        __array_priority__ = 1000
+
+        def __init__(self, arr, sample_ids):
+            self.arr = np.asarray(arr)
+            self.sample_ids = np.asarray(sample_ids)
+            if self.arr.shape[-1] != self.sample_ids.shape[0]:
+                raise ValueError("sample_IDs length must match chamber axis length")
+            # precompute unique samples and inverse mapping
+            self._uniques, self._inv = np.unique(self.sample_ids, return_inverse=True)
+
+        def _reduce_per_sample(self, func, *args, **kwargs):
+            """Apply func to each group's slice along the chamber axis (last axis)
+            and map the per-sample result back to chambers.
+            """
+            arr = self.arr
+            inv = self._inv
+            uniques = self._uniques
+            per_sample = []
+            # Prepare kwargs so that axis defaults to -1 (the chamber axis inside group)
+            kwargs2 = dict(kwargs)
+
+            # only set axis kw if user didn't provide any extra positional args
+            # (so we won't override a user-provided positional axis/q)
+            if 'axis' not in kwargs2 and len(args) <= 1:
+                kwargs2['axis'] = -1
+
+            for s_idx in range(uniques.shape[0]):
+                mask = (inv == s_idx)
+                group = arr[..., mask]
+                # Replace the original first positional arg (the array) with the group
+                # so we don't accidentally pass the old GroupedField or duplicate args.
+                if len(args) >= 1:
+                    new_args = list(args)
+                    new_args[0] = group
+                else:
+                    new_args = [group]
+
+                # Call the reduction function on the group along its last axis
+                res = func(*new_args, **kwargs2)
+                per_sample.append(np.asarray(res))
+
+            # Stack results into shape (..., n_samples, ...extra)
+            stacked = np.stack(per_sample, axis=-1)
+            # Map per-sample results back to chambers using inverse indices
+            mapped = stacked[..., inv]
+            return mapped
+
+        # Intercept NumPy functions (np.mean, np.median, np.percentile, etc.)
+        def __array_function__(self, func, types, args, kwargs):
+            # We'll accept typical reduction functions from numpy
+            try:
+                name = func.__name__
+            except Exception:
+                name = None
+
+            # Special-case percentile as it expects 'q' as second positional arg
+            if func is np.percentile or name == 'percentile':
+                # np.percentile(a, q, axis=None, **kwargs)
+                # args may contain q as args[0]
+                return self._reduce_per_sample(func, *args, **kwargs)
+
+            # For other reductions, forward axis=-1 if not provided
+            return self._reduce_per_sample(func, *args, **kwargs)
+
+        # Fallback conversion to ndarray: return the raw per-chamber array
+        def __array__(self, dtype=None):
+            return np.asarray(self.arr, dtype=dtype)
+
+    class GroupAccessor:
+        """Accessor returned by proxy.sample — used to fetch grouped fields."""
+        def __init__(self, obj):
+            self._obj = obj
+
+        def __getattr__(self, field_name):
+            if field_name not in self._obj.dep_var_type:
+                raise AttributeError(field_name)
+            idx = self._obj.dep_var_type.index(field_name)
+            arr = self._obj.dep_var[..., idx]
+            return GroupedField(arr, self._obj.indep_vars.sample_IDs)
+
+    class DeviceField:
+        """Wraps a per-chamber array and provides reductions across the
+        entire device (i.e., across the chamber axis). This intercepts
+        NumPy reduction functions so calls like `np.mean(a.device.luminance)`
+        reduce over chambers and return a scalar or appropriately-shaped
+        array without mapping back to chambers.
+        """
+        __array_priority__ = 1000
+
+        def __init__(self, arr):
+            self.arr = np.asarray(arr)
+
+        def _reduce_across_device(self, func, *args, **kwargs):
+            # Default to axis=-1 (chamber axis) if not provided
+            kwargs2 = dict(kwargs)
+            if 'axis' not in kwargs2 and len(args) <= 1:
+                kwargs2['axis'] = -1
+
+            # Ensure the first positional arg is the raw array
+            if len(args) >= 1:
+                new_args = list(args)
+                new_args[0] = self.arr
+            else:
+                new_args = [self.arr]
+
+            # Call the reduction
+            res = func(*new_args, **kwargs2)
+            res = np.asarray(res)
+
+            # Figure out which axis the reduction used (normalize negative indices)
+            axis_used = kwargs2.get('axis', None)
+            # If axis_used is a tuple/list, we won't try to map back
+            if isinstance(axis_used, (list, tuple, np.ndarray)):
+                return res
+
+            if axis_used is None:
+                return res
+
+            # Normalize axis to positive index
+            try:
+                axis_norm = int(axis_used)
+            except Exception:
+                return res
+
+            if axis_norm < 0:
+                axis_norm = axis_norm % self.arr.ndim
+
+            # If the reduction removed the chamber axis (last axis), map the
+            # per-device result back to chambers by inserting a chamber axis
+            # and repeating across chambers so the returned array has the
+            # same leading shape plus a chamber axis at the same position.
+            chamber_axis = self.arr.ndim - 1
+            if axis_norm == chamber_axis:
+                n_chambers = self.arr.shape[-1]
+                # res.shape should start with arr.shape[:-1]
+                prefix = self.arr.shape[:-1]
+                if res.shape[:len(prefix)] != prefix:
+                    # Unexpected shape; just return the raw result
+                    return res
+
+                # Insert chamber axis before any extra tail dims
+                insert_at = len(prefix)
+                expanded = np.expand_dims(res, axis=insert_at)
+                mapped = np.repeat(expanded, n_chambers, axis=insert_at)
+                return mapped
+
+            # Reduction wasn't along chamber axis — return as-is
+            return res
+
+        def __array_function__(self, func, types, args, kwargs):
+            try:
+                name = func.__name__
+            except Exception:
+                name = None
+
+            # Special-case percentile which expects q as second positional arg
+            if func is np.percentile or name == 'percentile':
+                return self._reduce_across_device(func, *args, **kwargs)
+
+            return self._reduce_across_device(func, *args, **kwargs)
+
+        def __array__(self, dtype=None):
+            return np.asarray(self.arr, dtype=dtype)
+
+    class DeviceAccessor:
+        """Accessor returned by proxy.device — used to fetch device-wide fields."""
+        def __init__(self, obj):
+            self._obj = obj
+
+        def __getattr__(self, field_name):
+            if field_name not in self._obj.dep_var_type:
+                raise AttributeError(field_name)
+            idx = self._obj.dep_var_type.index(field_name)
+            arr = self._obj.dep_var[..., idx]
+            return DeviceField(arr)
+
+    class DataProxy:
+        """Proxy for a DataND-like object that exposes dot syntax.
+        Example: a.luminance, a.sample.luminance, a.chamber.luminance
+        """
+        def __init__(self, obj):
+            self._obj = obj
+            self.sample = GroupAccessor(obj)
+            self.device = DeviceAccessor(obj)
+            # chamber accessor is an alias to raw attributes
+            self.chamber = self
+
+        def __getattr__(self, name):
+            # Return raw per-chamber array for dep_var fields
+            if name in self._obj.dep_var_type:
+                idx = self._obj.dep_var_type.index(name)
+                return self._obj.dep_var[..., idx]
+            raise AttributeError(name)
+
     for i, obj in enumerate(data_objs):
         prefix = f"{chr(ord('a') + i)}_"  # 'a_', 'b_', 'c_', ...
+        # expose both flat names (a_luminance) and single-letter proxy (a)
+        proxy_name = f"{chr(ord('a') + i)}"
+        if proxy_name in namespace:
+            raise ValueError(f"Namespace conflict: '{proxy_name}' already exists.")
+        namespace[proxy_name] = DataProxy(obj)
         for idx, field_name in enumerate(obj.dep_var_type):
             key = prefix + field_name
             if key in namespace:
                 raise ValueError(f"Namespace conflict: '{key}' already exists.")
             namespace[key] = obj.dep_var[..., idx]
+    
+    # If the caller provided named variables to be available in the expression,
+    # merge them into the namespace. This lets callers pass real objects (e.g.
+    # NumPy arrays) instead of embedding their stringified representations into
+    # the expression.
+    #
+    # We intentionally validate keys so callers can't override internal
+    # proxies (a, b, a_luminance, etc.) or inject underscored names.
+    # Merge provided expression_vars (if any) into the namespace so they are
+    # available when evaluating `expr`. This is the preferred mechanism for
+    # passing arrays or other objects into expressions without stringifying
+    # them.
+    if expression_vars is not None:
+        if not isinstance(expression_vars, dict):
+            raise TypeError("expression_vars must be a dict mapping names to objects")
+        for k, v in expression_vars.items():
+            if not isinstance(k, str):
+                raise TypeError("expression_vars keys must be strings")
+            if not k.isidentifier() or k.startswith("_"):
+                raise ValueError(f"Invalid expression variable name: {k!r}")
+            if k in namespace or k in ("np",):
+                raise ValueError(f"expression_vars name '{k}' conflicts with existing namespace")
+            namespace[k] = v
 
     # 4) Evaluate the expression using NumPy
     safe_globals = {"__builtins__": None, "np": np}
+    print(f"Evaluating expression: {expr}")
     try:
         result = eval(expr, safe_globals, namespace)
     except Exception as e:
@@ -125,7 +360,40 @@ def transform_data(
         )
 
     # 6) Expand the last axis so that new dep_var has final dim = 1
-    new_dep_var = result[..., np.newaxis]
+    new_transformed = result[..., np.newaxis]
+
+    # If caller wants to keep existing dep_vars, combine them with the new one
+    if keep_existing:
+        # original dep_var and dep_var_type from first object
+        orig_dep = data_objs[0].dep_var
+        orig_types = list(data_objs[0].dep_var_type)
+
+        # If output_name already exists, replace that column; otherwise append
+        if output_name in orig_types:
+            replace_idx = orig_types.index(output_name)
+            # Ensure shapes match (all dep_vars share same leading shape)
+            if orig_dep.shape[:-1] != new_transformed.shape[:-1]:
+                raise ValueError(
+                    "Transformed result shape does not match original dependent variable shape."
+                )
+            combined = orig_dep.copy()
+            combined[..., replace_idx] = new_transformed[..., 0]
+            combined = combined  # shape unchanged
+            combined_types = orig_types
+        else:
+            # concatenate along final axis
+            if orig_dep.shape[:-1] != new_transformed.shape[:-1]:
+                raise ValueError(
+                    "Transformed result shape does not match original dependent variable shape."
+                )
+            combined = np.concatenate([orig_dep, new_transformed], axis=-1)
+            combined_types = orig_types + [output_name]
+
+        final_dep_var = combined
+        final_dep_var_type = combined_types
+    else:
+        final_dep_var = new_transformed
+        final_dep_var_type = [output_name]
 
     # 7) Build the output object—same class as first, same indep_vars, new dep_var + dep_var_type
     NewClass = base_class
@@ -133,8 +401,8 @@ def transform_data(
     try:
         new_instance = NewClass(
             indep_vars   = data_objs[0].indep_vars, # deep-copied by DataND constructor
-            dep_var      = new_dep_var,
-            dep_var_type = [output_name],
+            dep_var      = final_dep_var,
+            dep_var_type = final_dep_var_type,
             meta         = deepcopy(data_objs[0].meta)
         )
     except TypeError:
@@ -144,98 +412,3 @@ def transform_data(
         )
 
     return new_instance
-
-# def transform_data(
-#     data_obj,              # e.g. a Data2D or Data3D or Data4D instance
-#     standard_obj,          # same class as data_obj, same shape in .dep_var
-#     expr: str,             # e.g. "(luminance - intercept) / slope"
-#     output_name: str       # name of the new field, e.g. "concentration"
-# ):
-#     """
-#     Return a new object of the same class as `data_obj` in which:
-#       - The indep_vars are deep-copied from data_obj.
-#       - We evaluate `expr` elementwise, treating each name in
-#         data_obj.dep_var_type  and standard_obj.dep_var_type
-#         as a NumPy array of shape  = data_obj.dep_var[..., i].
-#       - The result (shape = data_obj.dep_var.shape[:-1]) is
-#         expanded along a new final axis of size 1, and stored
-#         in the new .dep_var.  The new .dep_var_type = [output_name].
-#     """
-
-#     # 1) Must be exactly the same class and same dep_var shape
-#     if type(data_obj) is not type(standard_obj):
-#         raise TypeError(
-#             f"Cannot transform between different classes: "
-#             f"{type(data_obj).__name__!r} vs {type(standard_obj).__name__!r}"
-#         )
-#     if data_obj.dep_var.shape != standard_obj.dep_var.shape:
-#         raise ValueError(
-#             f"data_obj.dep_var.shape = {data_obj.dep_var.shape} but "
-#             f"standard_obj.dep_var.shape = {standard_obj.dep_var.shape}. "
-#             "They must match exactly."
-#         )
-
-#     # 2) Build a local namespace mapping each field name → its NumPy array slice
-#     namespace = {}
-#     # — from data_obj:
-#     for idx, field_name in enumerate(data_obj.dep_var_type):
-#         if field_name in namespace:
-#             raise ValueError(f"Duplicate dep_var_type {field_name!r} in data_obj")
-#         namespace[field_name] = data_obj.dep_var[..., idx]
-#     # — from standard_obj:
-#     for idx, field_name in enumerate(standard_obj.dep_var_type):
-#         # if field_name in namespace:
-#         #     raise ValueError(
-#         #         f"Name conflict: {field_name!r} appears in both "
-#         #         "data_obj.dep_var_type and standard_obj.dep_var_type"
-#         #     )
-#         namespace[field_name] = standard_obj.dep_var[..., idx]
-
-#     # 3) Evaluate the expression using NumPy
-#     #    We explicitly disable builtins for safety, but allow 'np' for math.
-#     safe_globals = {"__builtins__": None, "np": np}
-
-#     try:
-#         result = eval(expr, safe_globals, namespace)
-#     except Exception as e:
-#         raise RuntimeError(f"Error evaluating expression {expr!r}: {e}")
-
-#     # 4) The result should be a NumPy array of shape = data_obj.dep_var.shape[:-1].
-#     if not isinstance(result, np.ndarray):
-#         # If the user wrote something that yields a scalar or Python list, convert to np.array:
-#         result = np.array(result)
-
-#     expected_shape = data_obj.dep_var.shape[:-1]
-#     if result.shape != expected_shape:
-#         raise ValueError(
-#             f"After evaluating {expr!r}, got result.shape = {result.shape}, "
-#             f"but expected shape = {expected_shape}.  Check that your field names "
-#             "align correctly."
-#         )
-
-#     # 5) Expand the last axis so that the new dep_var has final dim = 1
-#     new_dep_var = result[..., np.newaxis]  # shape = (*expected_shape, 1)
-
-#     # 6) Build the output object—same class, same indep_vars, new dep_var + dep_var_type
-#     NewClass = type(data_obj)
-#     new_indep = deepcopy(data_obj.indep_vars)
-
-#     # If the original class signature is (indep_vars, dep_var, dep_var_type, meta),
-#     # we pass them in accordingly.  If your class signature differs, you may adapt this.
-#     try:
-#         new_instance = NewClass(
-#             indep_vars = new_indep,
-#             dep_var = new_dep_var,
-#             dep_var_type = [output_name],
-#             meta = deepcopy(data_obj.meta)
-#         )
-#     except TypeError:
-#         # In case your DataND constructor does not take a 'meta' argument in that position,
-#         # try omitting it (or adjust as needed).
-#         new_instance = NewClass(
-#             indep_vars = new_indep,
-#             dep_var = new_dep_var,
-#             dep_var_type = [output_name]
-#         )
-
-#     return new_instance

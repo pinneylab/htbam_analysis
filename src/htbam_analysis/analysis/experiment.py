@@ -123,6 +123,68 @@ class HTBAMExperiment:
 
 
     ### PLOTTING ###
+    def plot_chip_by_variable(self, analysis_name: str, variable: str):
+        '''
+        Plot a full chip with raw data and a specified variable.
+
+        Parameters:
+            analysis_name (str): the name of the analysis to be plotted.
+            variable (str): the name of the variable to be plotted.
+
+        Returns:
+            None
+        '''
+        #plotting variable: We'll plot by luminance. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
+        
+        analysis_data = self.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
+        
+        plotting_var = variable
+
+        # Verify we have the variable:
+        if plotting_var not in analysis_data.dep_var_type:
+            raise ValueError(f"'{plotting_var}' not found in analysis data. Available variables: {analysis_data.dep_vars_types}")
+        else:
+            plotting_var_index = analysis_data.dep_var_type.index(plotting_var)
+
+        concentration = analysis_data.dep_var[..., plotting_var_index]  # (n_chambers, n_conc, 1)
+       
+        #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
+        #chamber_names_dict = self._db_conn.get_chamber_name_dict()
+        chamber_names = analysis_data.indep_vars.chamber_IDs # (n_chambers,)
+        sample_names =  analysis_data.indep_vars.sample_IDs # (n_chambers,)
+
+        # Create dictionary mapping chamber_id -> sample_name:
+        sample_names_dict = {}
+        for i, chamber_id in enumerate(chamber_names):
+            sample_names_dict[chamber_id] = sample_names[i]
+
+        # Create dictionary mapping chamber_id -> concentration:
+        concentration_dict = {}
+        for i, chamber_id in enumerate(chamber_names):
+            concentration_dict[chamber_id] = concentration[i]
+            
+
+        #plotting function: We'll generate a subplot for each chamber, showing a histogram across replicates with our chosen chamber in red.
+        def plot_chamber_variable(chamber_id, ax):
+            #parameters:
+            # get the sample_ID for this chamber:
+            sample_id = sample_names_dict[chamber_id]
+            # Get all replicates with this sample_id:
+            repl_indices = [i for i, s in enumerate(sample_names) if s == sample_id]
+            # Get the concentration values for these replicates:
+            repl_concentrations = concentration[repl_indices]
+
+            #x_data = concentration_dict[chamber_id]
+            ax.hist(repl_concentrations, bins=10)
+            # add the current datapoint as a red bar:
+            ax.axvline(concentration_dict[chamber_id], color='red', linestyle='dashed', linewidth=2)
+            ax.set_title(f'{chamber_id}: {sample_names_dict[chamber_id]}')
+            ax.set_xlabel(f'{plotting_var}')
+            ax.set_ylabel('Count')
+            return ax
+
+        plot_chip(concentration_dict, sample_names_dict, title=f'Analysis: {plotting_var}', graphing_function=plot_chamber_variable)
+
     def plot_standard_curve_chip(self, analysis_name: str, experiment_name: str):
         '''
         Plot a full chip with raw data and std curve slopes.
@@ -190,7 +252,9 @@ class HTBAMExperiment:
         
         plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
 
-    def plot_initial_rates_chip(self, analysis_name: str, experiment_name: str, skip_start_timepoint: bool = True):
+    def plot_initial_rates_chip(self, analysis_name: str, experiment_name: str, skip_start_timepoint: bool = True,
+                               plot_xmax: float = None, plot_ymax: float = None,
+                               plot_xmin: float = None, plot_ymin: float = None):
         '''
         Plot a full chip with raw data and fit initial rates.
 
@@ -265,7 +329,17 @@ class HTBAMExperiment:
                 ax.scatter(x_data[i], y_data[i,:].flatten(), color=colors[i], alpha=0.3) # raw data
                 ax.plot(x_data[i], m[i]*x_data[i] + b[i], color=colors[i], alpha=1, linewidth=2, label=f'{substrate_conc[i]}')  # fitted line
 
+            # Set axis limits if provided
+            if plot_xmax is not None:
+                ax.set_xlim(right=plot_xmax)
+            if plot_ymax is not None:
+                ax.set_ylim(top=plot_ymax)
+            if plot_xmin is not None:
+                ax.set_xlim(left=plot_xmin)
+            if plot_ymin is not None:
+                ax.set_ylim(bottom=plot_ymin)
             ax.legend()
+
             return ax
         
         plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_initial_rates, title='Kinetics: Initial Rates')
