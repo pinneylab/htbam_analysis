@@ -45,6 +45,7 @@
 
 import numpy as np
 from copy import deepcopy
+import pint
 
 def transform_data(
     data_objs: list,        # list of Data2D, Data3D, Data4D instances (all same class and shape)
@@ -315,7 +316,8 @@ def transform_data(
             key = prefix + field_name
             if key in namespace:
                 raise ValueError(f"Namespace conflict: '{key}' already exists.")
-            namespace[key] = obj.dep_var[..., idx]
+            # Adding the array, with units!
+            namespace[key] = obj.dep_var[..., idx] * obj.dep_var_units[idx]
     
     # If the caller provided named variables to be available in the expression,
     # merge them into the namespace. This lets callers pass real objects (e.g.
@@ -349,7 +351,7 @@ def transform_data(
         raise RuntimeError(f"Error evaluating expression {expr!r}: {e}")
 
     # 5) Ensure result is a NumPy array of the correct shape
-    if not isinstance(result, np.ndarray):
+    if not isinstance(result, np.ndarray) and not isinstance(result, pint.Quantity):
         result = np.array(result)
 
     expected_shape = base_shape[:-1]
@@ -361,12 +363,15 @@ def transform_data(
 
     # 6) Expand the last axis so that new dep_var has final dim = 1
     new_transformed = result[..., np.newaxis]
+    new_transformed_units = result.units
+    new_transformed = np.array(new_transformed) # convert to NumPy array (from Quantity)
 
     # If caller wants to keep existing dep_vars, combine them with the new one
     if keep_existing:
         # original dep_var and dep_var_type from first object
         orig_dep = data_objs[0].dep_var
         orig_types = list(data_objs[0].dep_var_type)
+        orig_units = list(data_objs[0].dep_var_units)
 
         # If output_name already exists, replace that column; otherwise append
         if output_name in orig_types:
@@ -380,6 +385,7 @@ def transform_data(
             combined[..., replace_idx] = new_transformed[..., 0]
             combined = combined  # shape unchanged
             combined_types = orig_types
+            combined_units = orig_units
         else:
             # concatenate along final axis
             if orig_dep.shape[:-1] != new_transformed.shape[:-1]:
@@ -388,12 +394,16 @@ def transform_data(
                 )
             combined = np.concatenate([orig_dep, new_transformed], axis=-1)
             combined_types = orig_types + [output_name]
+            combined_units = orig_units + [new_transformed_units]
 
         final_dep_var = combined
         final_dep_var_type = combined_types
+        final_dep_var_units = combined_units
+
     else:
-        final_dep_var = new_transformed
+        final_dep_var = np.array(new_transformed)
         final_dep_var_type = [output_name]
+        final_dep_var_units = [new_transformed_units]
 
     # 7) Build the output object—same class as first, same indep_vars, new dep_var + dep_var_type
     NewClass = base_class
@@ -403,6 +413,7 @@ def transform_data(
             indep_vars   = data_objs[0].indep_vars, # deep-copied by DataND constructor
             dep_var      = final_dep_var,
             dep_var_type = final_dep_var_type,
+            dep_var_units = final_dep_var_units,
             meta         = deepcopy(data_objs[0].meta)
         )
     except TypeError:

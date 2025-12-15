@@ -553,7 +553,7 @@ class HTBAMExperiment:
                   graphing_function=plot_rates_vs_conc,
                   title="Initial Rates vs Concentration")
 
-    def plot_enzyme_concentration_chip(self, analysis_name: str, units:str, skip_start_timepoint: bool = True):
+    def plot_enzyme_concentration_chip(self, analysis_name: str, skip_start_timepoint: bool = True):
         '''
         Plot a full chip with raw data and fit initial rates.
 
@@ -576,8 +576,9 @@ class HTBAMExperiment:
         else:
             plotting_var_index = analysis_data.dep_var_type.index(plotting_var)
 
-        concentration = analysis_data.dep_var[..., plotting_var_index]  # (n_chambers, n_conc, 1)
-       
+        conc_units = analysis_data.dep_var_units[plotting_var_index]
+        concentration = analysis_data.dep_var[..., plotting_var_index] * conc_units # (n_chambers, n_conc, 1)
+        
         #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
         #chamber_names_dict = self._db_conn.get_chamber_name_dict()
         chamber_names = analysis_data.indep_vars.chamber_IDs # (n_chambers,)
@@ -593,7 +594,7 @@ class HTBAMExperiment:
         for i, chamber_id in enumerate(chamber_names):
             conc_dict[chamber_id] = np.nanmean(concentration[i])
         
-        plot_chip(conc_dict, sample_names_dict, title=f'Enzyme Concentration ({units})')
+        plot_chip(conc_dict, sample_names_dict, title=f'Enzyme Concentration')
 
     def plot_mask_chip(self, mask_name: str):
         '''

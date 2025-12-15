@@ -20,10 +20,18 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
     img_array = np.zeros([56,32])
 
     # Here we're plotting to value for each chamber (e.g. coloring by std curve slope)
+    units = ''
     for chamber_id, value in plotting_var.items():
         x = int(chamber_id.split(',')[0])
         y = int(chamber_id.split(',')[1])
-        img_array[y-1,x-1] = value 
+        
+        # Check if value has units (Pint quantity)
+        if hasattr(value, 'magnitude') and hasattr(value, 'units'):
+            img_array[y-1,x-1] = float(value.magnitude)
+            if not units:
+                units = str(f'{value.units:~}')
+        else:
+            img_array[y-1,x-1] = float(value) 
     
     #generate title
     if title is None:
@@ -41,7 +49,8 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
         y=y_vals,
         z=img_array,
         colorscale='Viridis',
-        hovertemplate='x=%{x}<br>y=%{y}<br>z=%{z}<extra></extra>'
+        colorbar=dict(title=units),
+        hovertemplate='x=%{x}<br>y=%{y}<br>z=%{z} ' + units +'<extra></extra>'
     )
     
     fig = go.Figure(layout=layout, data=heatmap)
