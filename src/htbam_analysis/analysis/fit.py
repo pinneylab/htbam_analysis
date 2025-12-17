@@ -7,6 +7,16 @@ from scipy.optimize import curve_fit
 import inspect
 
 from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
+from htbam_db_api.units.units import units as ureg
+
+from pint.errors import DimensionalityError
+
+### Decorator to add preferred units to functions:
+def set_units(**kwargs):
+    def decorator(func):
+        func.get_param_units = kwargs
+        return func
+    return decorator
 
 ### Models:
 # These get passed to scipy's curve_fit function. The first argument is is always x, followed by the parameters to fit.
@@ -14,10 +24,14 @@ from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
 # Linear: We use sklearn's LinearRegression for speed.
 
 # Michaelis-Menten:
+@set_units( x = ureg.uM,                # x is the independent variable (input)
+            v_max = ureg.uM / ureg.s,   # v_max and K_m are the parameters to fit
+            K_m = ureg.uM,              
+            y = ureg.uM / ureg.s)       # y is the dependent variable (output)
 def mm_model(x, v_max, K_m):
     """
     Michaelis-Menten model for enzyme kinetics.
-    
+     
     Parameters
     ----------
     x : array-like
@@ -35,6 +49,11 @@ def mm_model(x, v_max, K_m):
     return v_max * x / (K_m + x)
 
 # Inhibition model:
+@set_units(x = ureg.uM,                 # x is the independent variable (input)
+            r_max = ureg.dimensionless, # r_max, r_min, and ic50 are the parameters to fit
+            r_min = ureg.dimensionless, #
+            ic50 = ureg.uM,             #
+            y = ureg.dimensionless)     # y is the dependent variable (output)
 def inhibition_model(x, r_max, r_min, ic50):
     """
     Inhibition model for dose-response curves.
@@ -95,28 +114,42 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
     indep = data.indep_vars  # (n_conc, n_time)
     dep   = data.dep_var
 
-    x = "time"
-    y = "concentration"
+    x_label = "time"
+    y_label = "concentration"
 
-    if y not in data.dep_var_type:
-        raise KeyError(f"'{y}' not in data.dep_var_type.")
+    if y_label not in data.dep_var_type:
+        raise KeyError(f"'{y_label}' not in data.dep_var_type.")
     # if x not in data.indep_vars:
     #     raise KeyError(f"'{x}' not in data.indep_vars.")
 
-    y_idx = data.dep_var_type.index(y)
+    y_idx = data.dep_var_type.index(y_label)
+
+    # Unit handling
+    x_unit = indep.time.units
+    y_unit = data.dep_var_units[y_idx]
+
+    slope_unit = y_unit / x_unit
+    intercept_unit = y_unit
+    r_squared_unit = ureg.dimensionless
 
     Y = dep[..., y_idx]                              # (n_conc , n_time , n_chamb)
+    if hasattr(Y, 'magnitude'): Y = Y.magnitude
 
     n_conc, n_time, n_chamb = Y.shape
     model = LinearRegression()
 
-    T = indep.time                      # (n_conc , n_time)
+    T = indep.time                                   # (n_conc , n_time)
+    if hasattr(T, 'magnitude'): T = T.magnitude
+
     slope     = np.full((n_conc, n_chamb), np.nan, dtype=float)
     intercept = np.full_like(slope, np.nan)
     r_squared = np.full_like(slope, np.nan)
 
     # If user provided per-concentration fit windows, validate them and prepare a mapping
-    concs = np.asarray(indep.concentration)
+    concs = indep.concentration
+    if hasattr(concs, 'magnitude'):
+        concs = concs.magnitude
+    concs = np.asarray(concs)
     per_conc_windows = None
     if fit_windows_per_concentration is not None:
         if not isinstance(fit_windows_per_concentration, dict):
@@ -180,6 +213,7 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
         indep_vars=deepcopy(data.indep_vars),
         dep_var=np.stack((slope, intercept, r_squared), axis=-1),  # (n_conc, n_chamb, 3)
         dep_var_type=["slope", "intercept", "r_squared"],
+        dep_var_units=[slope_unit, intercept_unit, r_squared_unit],
         meta=data.meta
     )
     n_conc = indep.time.shape[0]  # number of concentrations
@@ -229,13 +263,27 @@ def fit_luminance_vs_concentration(data: Data4D, *, min_pts: int = 2, timepoint:
 
     y_idx = data.dep_var_type.index(y_label)
 
+    # Unit handling
+    # We strip units for fitting to avoid warnings, then re-apply them to the results
+    x_unit = indep.units
+    y_unit = data.dep_var_units[y_idx]
+    
+    # Calculate output units
+    slope_unit = y_unit / x_unit
+    intercept_unit = y_unit
+    r2_unit = ureg.dimensionless
+
     Y = dep[..., y_idx]                              # (n_conc , n_time , n_chamb)
+    if hasattr(Y, 'magnitude'): Y = Y.magnitude      # Strip units
+    
     Yi = Y[:, timepoint, :]                          # shape (n_conc , n_chamb)
 
     n_conc, n_time, n_chamb = Y.shape
     model = LinearRegression()
     
     X_vec = indep        # (n_conc,)
+    if hasattr(X_vec, 'magnitude'): X_vec = X_vec.magnitude # Strip units
+    
     X_all = X_vec.reshape(-1, 1)     # (n_conc, 1)
     # slope/intercept per (time , chamber)
     slope     = np.full((n_chamb), np.nan, dtype=float)
@@ -255,7 +303,7 @@ def fit_luminance_vs_concentration(data: Data4D, *, min_pts: int = 2, timepoint:
         model.fit(X_all[good], y[good])
         intercept[j] = model.intercept_
         slope[j]     = model.coef_[0]
-        r_squared[j] = model.score(X_all[good], y[good])  # R² for each chamber
+        r_squared[j] = model.score(X_all[good], y[good])  # R² for each chamber ## temp
 
     elapsed = time.time() - start
     print(f'Fit slopes for {n_chamb} wells.')
@@ -265,6 +313,7 @@ def fit_luminance_vs_concentration(data: Data4D, *, min_pts: int = 2, timepoint:
         indep_vars=data.indep_vars,
         dep_var=np.stack((slope, intercept, r_squared), axis=-1),  # (n_chamb, 3)
         dep_var_type=["slope", "intercept", "r_squared"],
+        dep_var_units=[slope_unit, intercept_unit, r2_unit],
         meta=data.meta
     )
 
@@ -277,7 +326,7 @@ def fit_initial_rates_vs_concentration_with_function(
     min_pts: int = 2,
     bounds: tuple = (-np.inf, np.inf),
     maxfev: int = 10000,
-    p0: List[float] = None
+    p0: List[float] = None,
 ) -> Tuple[Data2D, Data3D]:
     """
     Fit a user-defined nonlinear function to initial rates vs substrate concentrations.
@@ -314,9 +363,11 @@ def fit_initial_rates_vs_concentration_with_function(
     # extract substrate concentrations and initial rates
     X = data.indep_vars.concentration                 # (n_conc,)
     slope_idx = data.dep_var_type.index("slope")
-    Y = data.dep_var[..., slope_idx]                  # (n_conc, n_chamb)
+    Y_unit = data.dep_var_units[slope_idx]
+    Y = data.dep_var[..., slope_idx] * Y_unit         # (n_conc, n_chamb)
 
     # perform fits
+    # Here we're passing in X and Y as pint Quantities, which we'll handle in the fit_nonlinear_models function
     results = fit_nonlinear_models(
         X,
         Y,
@@ -326,6 +377,7 @@ def fit_initial_rates_vs_concentration_with_function(
         maxfev=maxfev
     )
     params = results["params"]            # (n_chamb, N_params)
+    param_units = results["param_units"]   # (N_params,)
     y_pred = results["y_pred"]            # (n_conc, n_chamb)
     r2 = results["r_squared"]             # (n_chamb,)
 
@@ -342,6 +394,7 @@ def fit_initial_rates_vs_concentration_with_function(
         indep_vars=deepcopy(data.indep_vars),
         dep_var=dep2d,
         dep_var_type=names2d,
+        dep_var_units=param_units + [ureg.dimensionless], # adding r_squared unit (dimensionless)
         meta=meta2d
     )
 
@@ -353,6 +406,7 @@ def fit_initial_rates_vs_concentration_with_function(
         indep_vars=deepcopy(data.indep_vars),
         dep_var=pred3d,
         dep_var_type=["y_pred"],
+        dep_var_units=[Y_unit],
         meta=meta3d
     )
 
@@ -361,7 +415,7 @@ def fit_initial_rates_vs_concentration_with_function(
 ### Generalized fitting function:
 def fit_nonlinear_models(
     X_vec, 
-    Y, 
+    Y_vec, 
     model_func, 
     p0=None, 
     bounds=(-np.inf, np.inf), 
@@ -374,7 +428,7 @@ def fit_nonlinear_models(
     ----------
     X_vec : array-like, shape (n_points,)
         Independent variable (e.g., substrate concentrations).
-    Y : array-like, shape (n_points, n_series)
+    Y_vec : array-like, shape (n_points, n_series)
         Dependent data (e.g., initial rates), with each column as a separate series (chamber).
     model_func : callable
         Callable of the form model_func(x, *params) -> y. The first argument is x, 
@@ -400,9 +454,42 @@ def fit_nonlinear_models(
       • 'y_pred'      : array, shape (n_points, n_series); predicted y values (NaN where fit wasn’t done)  
       • 'r_squared'   : array, shape (n_series,); R² of each fit (NaN if not computed)
     """
-    # Convert to numpy arrays
-    X = np.asarray(X_vec, dtype=float)
-    Y = np.asarray(Y, dtype=float)
+
+    # First, does our fitting function have units?
+    if hasattr(model_func, 'get_param_units'):
+        param_units = model_func.get_param_units
+        # Double check that param_units has x (input), y (output) and all the named arguments in the model_func signature
+        if 'x' not in param_units or 'y' not in param_units:
+            raise ValueError(f"Model function {model_func.__name__} must have 'x' and 'y' units specified in @set_units decorator.")
+
+        sig = inspect.signature(model_func)
+        for name in sig.parameters:
+            if name not in param_units:
+                raise ValueError(f"Model function {model_func.__name__} must have '{name}' units specified in @set_units decorator.")
+    else:
+        raise ValueError("Model function must have a 'get_param_units' method. (Use @set_units decorator)")
+
+    # Convert X, Y to units specified in @set_units decorator:
+    # I'm going to copy them first so we don't modify the original data
+    X = X_vec.copy()
+    Y = Y_vec.copy()
+    try:
+        X = X.to(param_units['x'])
+        Y = Y.to(param_units['y'])
+    except DimensionalityError as e:
+        # Adding a clarifying message here.
+        raise ValueError(f"{e}\nX and Y must be convertible to units specified in @set_units decorator. X has units {X.units}, Y has units {Y.units}")
+
+
+    # Now, we convert to numpy arrays for model fitting (no units allowed)
+    #X = np.asarray(X, dtype=float)
+    if hasattr(X, 'magnitude'):
+        X = X.magnitude
+        
+    #Y = np.asarray(Y, dtype=float)
+    if hasattr(Y, 'magnitude'):
+        Y = Y.magnitude
+
     if X.ndim != 1:
         raise ValueError("X_vec must be 1D")
     if Y.ndim != 2:
@@ -414,9 +501,11 @@ def fit_nonlinear_models(
     num_params = len(sig.parameters) - 1
     if num_params < 1:
         raise ValueError("model_func must accept at least one parameter besides x")
+    # make list of param units, matching order in func signature:
+    param_units = [param_units[name] for name in sig.parameters if name not in ['x', 'y']]
 
     # Prepare output containers
-    params_list = [None] * n_series
+    params_list = [None] * n_series 
     pcov_list = [None] * n_series
     Y_pred = np.full_like(Y, np.nan)
     r_squared = np.full((n_series,), np.nan, dtype=float)
@@ -477,113 +566,114 @@ def fit_nonlinear_models(
 
     return {
         'params': params_list,
+        'param_units': param_units,
         'covariances': pcov_list,
         'y_pred': Y_pred,
         'r_squared': r_squared
     }
 
 
-#
-#fit(my_data: DataND, x_label='concentration', y_label='initial_rate', fit_function: callable)
-def fit_general(
-    data: Data3D,
-    x_label: str,
-    y_label: str,
-    fit_function: callable,
-    *,
-    min_pts: int = 2,
-    bounds: tuple = (-np.inf, np.inf),
-    maxfev: int = 10000,
-    p0: List[float] = None
-) -> Tuple[Data2D, Data3D]:
-    """
-    Fit a user-defined nonlinear function to y vs x.
+# #
+# #fit(my_data: DataND, x_label='concentration', y_label='initial_rate', fit_function: callable)
+# def fit_general(
+#     data: Data3D,
+#     x_label: str,
+#     y_label: str,
+#     fit_function: callable,
+#     *,
+#     min_pts: int = 2,
+#     bounds: tuple = (-np.inf, np.inf),
+#     maxfev: int = 10000,
+#     p0: List[float] = None
+# ) -> Tuple[Data2D, Data3D]:
+#     """
+#     Fit a user-defined nonlinear function to y vs x.
 
-    Parameters
-    ----------
-    data : Data3D
-        Data object with indep_vars and dep_var.
-    x_label : str
-        Label of the independent variable in indep_vars.
-    y_label : str
-        Label of the dependent variable in dep_var_type.
-    fit_function : callable
-        Callable of the form fit_function(x, *params) -> y. The first argument is x,
-        followed by N parameters to fit. For example:
+#     Parameters
+#     ----------
+#     data : Data3D
+#         Data object with indep_vars and dep_var.
+#     x_label : str
+#         Label of the independent variable in indep_vars.
+#     y_label : str
+#         Label of the dependent variable in dep_var_type.
+#     fit_function : callable
+#         Callable of the form fit_function(x, *params) -> y. The first argument is x,
+#         followed by N parameters to fit. For example:
 
-            def mm_model(x, v_max, K_m):
-                return v_max * x / (K_m + x)
-    min_pts : int, optional
-        Minimum number of (x, y) pairs required for a fit (default 2).
-    bounds : 2-tuple of array-like, optional
-        Lower and upper bounds on parameters, passed to `curve_fit`.
-        Defaults to no bounds (i.e. `(-inf, +inf)`).
-    maxfev : int, optional
-        Maximum number of function evaluations in `curve_fit`. Default is 10000.
-    p0 : sequence or None, optional
-        Initial guess for the fit parameters. If None, defaults to `[1.0]*N_params`.
-        Must have length = number of parameters in fit_function (i.e. signature minus 1).
+#             def mm_model(x, v_max, K_m):
+#                 return v_max * x / (K_m + x)
+#     min_pts : int, optional
+#         Minimum number of (x, y) pairs required for a fit (default 2).
+#     bounds : 2-tuple of array-like, optional
+#         Lower and upper bounds on parameters, passed to `curve_fit`.
+#         Defaults to no bounds (i.e. `(-inf, +inf)`).
+#     maxfev : int, optional
+#         Maximum number of function evaluations in `curve_fit`. Default is 10000.
+#     p0 : sequence or None, optional
+#         Initial guess for the fit parameters. If None, defaults to `[1.0]*N_params`.
+#         Must have length = number of parameters in fit_function (i.e. signature minus 1).
 
-    Returns
-    -------
-    Data2D: data object with dep_var of shape (n_chamb, N_params + 1) containing:
-    - fitted parameters (N_params)
-    - R² values (r_squared)
-    Data3D: data object with dep_var of shape (n_points, n_chamb, 1) containing:
-    - predicted y values (y_pred)
-    """
-    assert isinstance(data, Data3D), "data must be Data3D."
-    start = time.time()
+#     Returns
+#     -------
+#     Data2D: data object with dep_var of shape (n_chamb, N_params + 1) containing:
+#     - fitted parameters (N_params)
+#     - R² values (r_squared)
+#     Data3D: data object with dep_var of shape (n_points, n_chamb, 1) containing:
+#     - predicted y values (y_pred)
+#     """
+#     assert isinstance(data, Data3D), "data must be Data3D."
+#     start = time.time()
     
-    indep = data.indep_vars
-    dep   = data.dep_var
+#     indep = data.indep_vars
+#     dep   = data.dep_var
 
-    if x_label not in indep.__dict__:
-        raise KeyError(f"'{x_label}' not in indep_vars.")
-    if y_label not in data.dep_var_type:
-        raise KeyError(f"'{y_label}' not in dep_var_type.")
+#     if x_label not in indep.__dict__:
+#         raise KeyError(f"'{x_label}' not in indep_vars.")
+#     if y_label not in data.dep_var_type:
+#         raise KeyError(f"'{y_label}' not in dep_var_type.")
 
-    x = getattr(indep, x_label)                       # (n_points,)
-    y_idx = data.dep_var_type.index(y_label)
-    y = dep[..., y_idx]                               # (n_points, n_chamb)
+#     x = getattr(indep, x_label)                       # (n_points,)
+#     y_idx = data.dep_var_type.index(y_label)
+#     y = dep[..., y_idx]                               # (n_points, n_chamb)
 
-    # perform fits
-    results = fit_nonlinear_models(
-        x,
-        y,
-        fit_function,
-        p0=p0 or [1.0] * (len(inspect.signature(fit_function).parameters) - 1),
-        bounds=bounds,
-        maxfev=maxfev
-    )
-    params = results["params"]            # (n_chamb, N_params)
-    y_pred = results["y_pred"]            # (n_points, n_chamb)
-    r2 = results["r_squared"]             # (n_chamb,)
+#     # perform fits
+#     results = fit_nonlinear_models(
+#         x,
+#         y,
+#         fit_function,
+#         p0=p0 or [1.0] * (len(inspect.signature(fit_function).parameters) - 1),
+#         bounds=bounds,
+#         maxfev=maxfev
+#     )
+#     params = results["params"]            # (n_chamb, N_params)
+#     y_pred = results["y_pred"]            # (n_points, n_chamb)
+#     r2 = results["r_squared"]             # (n_chamb,)
 
-    num_successful_fits = np.sum(~np.isnan(params).any(axis=1))
-    print(f'Successfully fit nonlinear model for {num_successful_fits} wells.')
-    print('Elapsed', np.round(time.time() - start, 3), 'seconds.')
+#     num_successful_fits = np.sum(~np.isnan(params).any(axis=1))
+#     print(f'Successfully fit nonlinear model for {num_successful_fits} wells.')
+#     print('Elapsed', np.round(time.time() - start, 3), 'seconds.')
 
-    # 1) build Data2D of params + R²
-    param_names = list(inspect.signature(fit_function).parameters.keys())[1:]
-    dep2d = np.concatenate([params, r2[:,None]], axis=1)  # (n_chamb, Np+1)
-    names2d = param_names + ["r_squared"]
-    meta2d  = Meta(fit_type=fit_function.__name__,)
-    params_data = Data2D(
-        indep_vars=deepcopy(data.indep_vars),
-        dep_var=dep2d,
-        dep_var_type=names2d,
-        meta=meta2d
-    )
-    # 2) build Data3D of predictions
-    n_points, n_chamb = y_pred.shape
-    pred3d = y_pred.reshape(n_points, n_chamb, 1)   
-    meta3d = Meta(fit_type=fit_function.__name__)
-    ypred_data = Data3D(
-        indep_vars=deepcopy(data.indep_vars),
-        dep_var=pred3d,
-        dep_var_type=["y_pred"],
-        meta=meta3d
-    )
+#     # 1) build Data2D of params + R²
+#     param_names = list(inspect.signature(fit_function).parameters.keys())[1:]
+#     dep2d = np.concatenate([params, r2[:,None]], axis=1)  # (n_chamb, Np+1)
+#     names2d = param_names + ["r_squared"]
+#     meta2d  = Meta(fit_type=fit_function.__name__,)
+#     params_data = Data2D(
+#         indep_vars=deepcopy(data.indep_vars),
+#         dep_var=dep2d,
+#         dep_var_type=names2d,
+#         meta=meta2d
+#     )
+#     # 2) build Data3D of predictions
+#     n_points, n_chamb = y_pred.shape
+#     pred3d = y_pred.reshape(n_points, n_chamb, 1)   
+#     meta3d = Meta(fit_type=fit_function.__name__)
+#     ypred_data = Data3D(
+#         indep_vars=deepcopy(data.indep_vars),
+#         dep_var=pred3d,
+#         dep_var_type=["y_pred"],
+#         meta=meta3d
+#     )
 
-    return params_data, ypred_data
+#     return params_data, ypred_data

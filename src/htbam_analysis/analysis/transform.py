@@ -364,7 +364,7 @@ def transform_data(
     # 6) Expand the last axis so that new dep_var has final dim = 1
     new_transformed = result[..., np.newaxis]
     new_transformed_units = result.units
-    new_transformed = np.array(new_transformed) # convert to NumPy array (from Quantity)
+    new_transformed = new_transformed.magnitude # Proper way to convert to np array (without warnings)
 
     # If caller wants to keep existing dep_vars, combine them with the new one
     if keep_existing:

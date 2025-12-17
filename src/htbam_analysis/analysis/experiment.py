@@ -117,6 +117,7 @@ class HTBAMExperiment:
             indep_vars=run_data.indep_vars,
             dep_var=new_dep_var,
             dep_var_type=run_data.dep_var_type,
+            dep_var_units=run_data.dep_var_units,
             meta=meta
         )
         self.set_run(save_as, masked)
@@ -139,6 +140,7 @@ class HTBAMExperiment:
         analysis_data = self.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
         
         plotting_var = variable
+        plotting_var_unit = analysis_data.dep_var_units[analysis_data.dep_var_type.index(plotting_var)]
 
         # Verify we have the variable:
         if plotting_var not in analysis_data.dep_var_type:
@@ -146,7 +148,7 @@ class HTBAMExperiment:
         else:
             plotting_var_index = analysis_data.dep_var_type.index(plotting_var)
 
-        concentration = analysis_data.dep_var[..., plotting_var_index]  # (n_chambers, n_conc, 1)
+        concentration = analysis_data.dep_var[..., plotting_var_index] * plotting_var_unit # (n_chambers, n_conc, 1)
        
         #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
         #chamber_names_dict = self._db_conn.get_chamber_name_dict()
@@ -200,19 +202,25 @@ class HTBAMExperiment:
         
         experiment_data = self.get_run(experiment_name) # Raw data from experiment (to show datapoints)
         analysis_data = self.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
-
+        
         slope_idx = analysis_data.dep_var_type.index('slope')          # index of slope in dep_vars
         intercept_idx = analysis_data.dep_var_type.index('intercept')  # index of intercept in dep_vars
         r_squared_idx = analysis_data.dep_var_type.index('r_squared')  # index of r_squared in dep_vars
         
+        slope_unit = analysis_data.dep_var_units[slope_idx]
+        intercept_unit = analysis_data.dep_var_units[intercept_idx]
+        r_squared_unit = analysis_data.dep_var_units[r_squared_idx]
+        
         # Extract slopes and intercepts from analysis data
-        slopes_to_plot = analysis_data.dep_var[..., slope_idx]          # (n_chambers,)
-        intercepts_to_plot = analysis_data.dep_var[..., intercept_idx]  # (n_chambers,)
-        r_squared = analysis_data.dep_var[..., r_squared_idx]  # (n_chambers,)
+        slopes_to_plot = analysis_data.dep_var[..., slope_idx] * slope_unit          # (n_chambers,)
+        intercepts_to_plot = analysis_data.dep_var[..., intercept_idx] * intercept_unit  # (n_chambers,)
+        r_squared = analysis_data.dep_var[..., r_squared_idx] * r_squared_unit  # (n_chambers,)
 
+        luminance_unit = experiment_data.dep_var_units[experiment_data.dep_var_type.index('luminance')]
+        
         # Extract luminance and concentration from experiment data
         luminance_idx = experiment_data.dep_var_type.index('luminance')  # index of luminance in dep_vars
-        luminance = experiment_data.dep_var[..., luminance_idx]  # (n_chambers, n_timepoints, n_conc)
+        luminance = experiment_data.dep_var[..., luminance_idx] * luminance_unit  # (n_chambers, n_timepoints, n_conc)
         concentration = experiment_data.indep_vars.concentration # (n_conc,)
         
         #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
@@ -243,11 +251,10 @@ class HTBAMExperiment:
             #make a simple matplotlib plot
             ax.scatter(x_data, y_data)
             if not (np.isnan(m) or np.isnan(b)):
-                #return False, no_update, no_update
-                ax.plot(x_data, m*np.array(x_data) + b)
+                ax.plot(x_data, m*x_data + b)
                 ax.set_title(f'{chamber_id}: {sample_names_dict[chamber_id]}')
-                ax.set_xlabel('Concentration')
-                ax.set_ylabel('Luminance (RFU)')
+                ax.set_xlabel(f'Concentration ({concentration.units:~})')
+                ax.set_ylabel(f'Luminance ({luminance.units:~})')
             return ax
         
         plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
@@ -275,15 +282,20 @@ class HTBAMExperiment:
         slopes_idx = analysis_data.dep_var_type.index('slope')          # index of slope in dep_vars
         intercepts_idx = analysis_data.dep_var_type.index('intercept')  # index of intercept in dep_vars
         r_squared_idx = analysis_data.dep_var_type.index('r_squared')  # index of r_squared in dep_vars
+        
+        slope_unit = analysis_data.dep_var_units[slopes_idx]
+        intercept_unit = analysis_data.dep_var_units[intercepts_idx]
+        r_squared_unit = analysis_data.dep_var_units[r_squared_idx]
 
         # Extract slopes and intercepts from analysis data
-        slopes_to_plot = analysis_data.dep_var[..., slopes_idx]          # (n_chambers, n_conc)
-        intercepts_to_plot = analysis_data.dep_var[..., intercepts_idx]  # (n_chambers, n_conc)
-        r_squared = analysis_data.dep_var[..., r_squared_idx]          # (n_chambers, n_conc)
+        slopes_to_plot = analysis_data.dep_var[..., slopes_idx] * slope_unit          # (n_chambers, n_conc)
+        intercepts_to_plot = analysis_data.dep_var[..., intercepts_idx] * intercept_unit  # (n_chambers, n_conc)
+        r_squared = analysis_data.dep_var[..., r_squared_idx] * r_squared_unit          # (n_chambers, n_conc)
 
         # Extract product_concentration (Y) from experiment data
         product_conc_idx = experiment_data.dep_var_type.index('concentration')  # index of luminance in dep_vars
-        product_conc = experiment_data.dep_var[..., product_conc_idx]  # (n_chambers, n_timepoints, n_conc)
+        product_conc_unit = experiment_data.dep_var_units[product_conc_idx]
+        product_conc = experiment_data.dep_var[..., product_conc_idx] * product_conc_unit  # (n_chambers, n_timepoints, n_conc)
         substrate_conc = experiment_data.indep_vars.concentration # (n_conc,)
         time_data = experiment_data.indep_vars.time # (n_conc, n_timepoints)
 
@@ -327,7 +339,7 @@ class HTBAMExperiment:
             for i in range(y_data.shape[0]): #over each substrate concentration:
 
                 ax.scatter(x_data[i], y_data[i,:].flatten(), color=colors[i], alpha=0.3) # raw data
-                ax.plot(x_data[i], m[i]*x_data[i] + b[i], color=colors[i], alpha=1, linewidth=2, label=f'{substrate_conc[i]}')  # fitted line
+                ax.plot(x_data[i], m[i]*x_data[i] + b[i], color=colors[i], alpha=1, linewidth=2, label=f'{substrate_conc[i]:~}')  # fitted line
 
             # Set axis limits if provided
             if plot_xmax is not None:
@@ -338,6 +350,10 @@ class HTBAMExperiment:
                 ax.set_xlim(left=plot_xmin)
             if plot_ymin is not None:
                 ax.set_ylim(bottom=plot_ymin)
+            
+            ax.set_xlabel(f'Time ({time_data.units:~})')
+            ax.set_ylabel(f'Product Concentration ({product_conc.units:~})')
+
             ax.legend()
 
             return ax
@@ -357,18 +373,21 @@ class HTBAMExperiment:
         """
         analysis: Data3D = self.get_run(analysis_name)
         si = analysis.dep_var_type.index("slope")
-        slopes = analysis.dep_var[..., si]               # (n_conc, n_chambers)
+        slope_unit = analysis.dep_var_units[si]
+        slopes = analysis.dep_var[..., si] * slope_unit  # (n_conc, n_chambers)
         conc   = analysis.indep_vars.concentration       # (n_conc,)
 
         if model_pred_data_name:
             mf_pred: Data3D = self.get_run(model_pred_data_name)
             yi = mf_pred.dep_var_type.index("y_pred")
-            preds = mf_pred.dep_var[..., yi]           # (n_conc, n_chambers)
+            y_pred_unit = mf_pred.dep_var_units[yi]
+            preds = mf_pred.dep_var[..., yi] * y_pred_unit          # (n_conc, n_chambers)
 
         if model_fit_name:
             mf_fit: Data2D = self.get_run(model_fit_name)
             fit_types = mf_fit.dep_var_type           # e.g. ["v_max","K_m","r_squared"]
             fit_vals = mf_fit.dep_var                # shape (n_chamb, len(fit_types))
+            fit_units = mf_fit.dep_var_units
 
         chambers = analysis.indep_vars.chamber_IDs        # (n_chambers,)
         samples  = analysis.indep_vars.sample_IDs         # (n_chambers,)
@@ -389,15 +408,15 @@ class HTBAMExperiment:
                 # extract this chamber's fit row
                 chamb_idx = np.where(chambers == cid)[0][0]
                 vals = fit_vals[chamb_idx]
-                txt = "".join(f"{nm}={v:.2f}\n" for nm,v in zip(fit_types, vals))
+                txt = "".join(f"{nm}={v:.2f} {u:~}\n" for nm,v,u in zip(fit_types, vals, fit_units))
                 ax.text(0.05, 0.95, txt, transform=ax.transAxes,
                         va="top", fontsize=8, bbox=dict(boxstyle="round", fc="white", alpha=0.7))
 
             if model_pred_data_name or model_fit_name:
                 ax.legend()
             ax.set_title(f"{cid}: {sample_names[cid]}")
-            ax.set_xlabel("Concentration")
-            ax.set_ylabel("Initial Rate")
+            ax.set_xlabel(f"Concentration ({conc.units:~})")
+            ax.set_ylabel(f"Initial Rate ({slopes.units:~})")
             if x_log: ax.set_xscale("log")
             if y_log: ax.set_yscale("log")
             return ax
@@ -419,20 +438,23 @@ class HTBAMExperiment:
         """
         analysis: Data3D = self.get_run(analysis_name)
         si = analysis.dep_var_type.index("slope")
-        slopes = analysis.dep_var[..., si]               # (n_conc, n_chambers)
+        slope_unit = analysis.dep_var_units[si]
+        slopes = analysis.dep_var[..., si] * slope_unit  # (n_conc, n_chambers)
         conc   = analysis.indep_vars.concentration       # (n_conc,)
 
         mf_fit: Data2D = self.get_run(model_fit_name)
         fit_types = mf_fit.dep_var_type           # e.g. ["v_max","K_m","r_squared"]
         fit_vals = mf_fit.dep_var                # shape (n_chamb, len(fit_types))
+        fit_units = mf_fit.dep_var_units
 
         mm_idx = mf_fit.dep_var_type.index("v_max")
-        mms = mf_fit.dep_var[..., mm_idx]    # (n_chambers,)
+        mms = mf_fit.dep_var[..., mm_idx] * fit_units[mm_idx]   # (n_chambers,)
 
         if model_pred_data_name:
             mf_pred: Data3D = self.get_run(model_pred_data_name)
             yi = mf_pred.dep_var_type.index("y_pred")
-            preds = mf_pred.dep_var[..., yi]           # (n_conc, n_chambers)
+            y_pred_unit = mf_pred.dep_var_units[yi]
+            preds = mf_pred.dep_var[..., yi] * y_pred_unit          # (n_conc, n_chambers)
 
         chambers = analysis.indep_vars.chamber_IDs        # (n_chambers,)
         samples  = analysis.indep_vars.sample_IDs         # (n_chambers,)
@@ -451,34 +473,38 @@ class HTBAMExperiment:
                 sample = sample_names[cid]
                 same_idxs = [i for i, s in enumerate(samples) if s == sample]
                 y_all = preds[:, same_idxs]               # (n_conc, n_same)
-                y_min = np.nanmin(y_all, axis=1)
-                y_max = np.nanmax(y_all, axis=1)
-                ax.fill_between(x, y_min, y_max, color="gray", alpha=0.3, label='other well fits')
+                
+                # Show the 95% confidence interval:
+                y_min = np.nanpercentile(y_all, 2.5, axis=1)
+                y_max = np.nanpercentile(y_all, 97.5, axis=1)
+                
+                
+
                 # then overplot this chamber’s model fit
                 y_p = preds[:, idx].flatten()
                 ax.plot(x, y_p, color="red", label="current well fit")
+                ax.fill_between(x, y_min, y_max, color="gray", alpha=0.3, label='95% CI')
 
             if model_fit_name:
                 # extract this chamber's fit row
                 chamb_idx = np.where(chambers == cid)[0][0]
                 vals = fit_vals[chamb_idx]
-                txt = "".join(f"{nm}={v:.2f}\n" for nm,v in zip(fit_types, vals))
+                txt = "".join(f"{nm}={v:.2f} {u:~}\n" for nm,v,u in zip(fit_types, vals, fit_units))
                 ax.text(0.05, 0.95, txt, transform=ax.transAxes,
                         va="top", fontsize=8, bbox=dict(boxstyle="round", fc="white", alpha=0.7))
             
             if model_pred_data_name or model_fit_name:
                 ax.legend()
             ax.set_title(f"{cid}: {sample_names[cid]}")
-            ax.set_xlabel("Concentration")
-            ax.set_ylabel("Initial Rate")
+            ax.set_xlabel(f"Concentration ({conc.units:~})")
+            ax.set_ylabel(f"Initial Rate ({slopes.units:~})")
             if x_log: ax.set_xscale("log")
             if y_log: ax.set_yscale("log")
             return ax
 
         plot_chip(mms_to_plot, sample_names,
                   graphing_function=plot_rates_vs_conc,
-                  title="Initial Rates vs Concentration")
-        
+                  title="Initial Rates vs Concentration")        
     
     def plot_ic50_chip(self,
                     analysis_name: str,
@@ -493,20 +519,23 @@ class HTBAMExperiment:
         """
         analysis: Data3D = self.get_run(analysis_name)
         si = analysis.dep_var_type.index("slope")
-        slopes = analysis.dep_var[..., si]               # (n_conc, n_chambers)
+        slope_unit = analysis.dep_var_units[si]
+        slopes = analysis.dep_var[..., si] * slope_unit  # (n_conc, n_chambers)
         conc   = analysis.indep_vars.concentration       # (n_conc,)
 
         mf_fit: Data2D = self.get_run(model_fit_name)
         fit_types = mf_fit.dep_var_type           # e.g. ["v_max","K_m","r_squared"]
         fit_vals = mf_fit.dep_var                # shape (n_chamb, len(fit_types))
+        fit_units = mf_fit.dep_var_units
 
         ic50s_idx = mf_fit.dep_var_type.index("ic50")
-        ic50s = mf_fit.dep_var[..., ic50s_idx]    # (n_chambers,)
+        ic50s = mf_fit.dep_var[..., ic50s_idx] * fit_units[ic50s_idx]    # (n_chambers,)
 
         if model_pred_data_name:
             mf_pred: Data3D = self.get_run(model_pred_data_name)
             yi = mf_pred.dep_var_type.index("y_pred")
-            preds = mf_pred.dep_var[..., yi]           # (n_conc, n_chambers)
+            y_pred_unit = mf_pred.dep_var_units[yi]
+            preds = mf_pred.dep_var[..., yi] * y_pred_unit          # (n_conc, n_chambers)
 
         chambers = analysis.indep_vars.chamber_IDs        # (n_chambers,)
         samples  = analysis.indep_vars.sample_IDs         # (n_chambers,)
@@ -525,26 +554,29 @@ class HTBAMExperiment:
                 sample = sample_names[cid]
                 same_idxs = [i for i, s in enumerate(samples) if s == sample]
                 y_all = preds[:, same_idxs]               # (n_conc, n_same)
-                y_min = np.nanmin(y_all, axis=1)
-                y_max = np.nanmax(y_all, axis=1)
-                ax.fill_between(x, y_min, y_max, color="gray", alpha=0.3, label='other well fits')
+
+                # Show the 95% confidence interval:
+                y_min = np.nanpercentile(y_all, 2.5, axis=1)
+                y_max = np.nanpercentile(y_all, 97.5, axis=1)
+                
                 # then overplot this chamber’s model fit
                 y_p = preds[:, idx].flatten()
                 ax.plot(x, y_p, color="red", label="current well fit")
+                ax.fill_between(x, y_min, y_max, color="gray", alpha=0.3, label='95% CI')
 
             if model_fit_name:
                 # extract this chamber's fit row
                 chamb_idx = np.where(chambers == cid)[0][0]
                 vals = fit_vals[chamb_idx]
-                txt = "".join(f"{nm}={v:.2f}\n" for nm,v in zip(fit_types, vals))
+                txt = "".join(f"{nm}={v:.2f} {u:~}\n" for nm,v,u in zip(fit_types, vals, fit_units))
                 ax.text(0.05, 0.95, txt, transform=ax.transAxes,
                         va="top", fontsize=8, bbox=dict(boxstyle="round", fc="white", alpha=0.7))
             
             if model_pred_data_name or model_fit_name:
                 ax.legend()
             ax.set_title(f"{cid}: {sample_names[cid]}")
-            ax.set_xlabel("Concentration")
-            ax.set_ylabel("Initial Rate")
+            ax.set_xlabel(f"Concentration ({conc.units:~})")
+            ax.set_ylabel(f"Initial Rate ({slopes.units:~})")
             if x_log: ax.set_xscale("log")
             if y_log: ax.set_yscale("log")
             return ax

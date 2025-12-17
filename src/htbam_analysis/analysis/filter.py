@@ -4,6 +4,7 @@ from sklearn.linear_model import LinearRegression
 from copy import deepcopy
 from typing import List, Dict
 from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
+from htbam_db_api.units import units
 
 ### Per-well filters
 # Standard curve R2 cutoff
@@ -39,6 +40,7 @@ def make_custom_mask (data, mask, info=""):
         indep_vars=data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata
     )
     
@@ -72,6 +74,7 @@ def filter_initial_rates_r2_cutoff(initial_rate_data, r2_cutoff):
         indep_vars=initial_rate_data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata
     )
     
@@ -107,6 +110,7 @@ def filter_by_sample_id(data, sample_ids: List[str]):
         indep_vars=data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata
     )
     
@@ -170,6 +174,7 @@ def filter_number_replicates(data, min_replicates, var_to_check):
         indep_vars=data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata
     )
     
@@ -232,11 +237,11 @@ def filter_number_concentrations(data, min_concentrations, var_to_check):
         indep_vars=data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata
     )
 
     return output_data
-
 
 
 def filter_r2_cutoff(data, r2_cutoff):
@@ -269,6 +274,7 @@ def filter_r2_cutoff(data, r2_cutoff):
         indep_vars=data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata
     )
     
@@ -289,6 +295,7 @@ def filter_initial_rates_positive_cutoff(initial_rate_data: Data3D):
         indep_vars=initial_rate_data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata,
     )
 
@@ -308,6 +315,7 @@ def filter_expression_cutoff(expression_data: Data2D, initial_rate_data: Data3D,
         indep_vars=initial_rate_data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata,
     )
 
@@ -327,5 +335,6 @@ def filter_standard_curve_r2_cutoff(standard_curve_fit_data: Data2D, initial_rat
         indep_vars=initial_rate_data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
         meta=metadata,
     )
