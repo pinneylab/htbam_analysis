@@ -911,3 +911,55 @@ def plot_mask_chip(experiment: 'HTBAMExperiment', mask_name: str):
     # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
     
     plot_chip(mask_sum, sample_names_dict, title=f'# Concentrations that pass filter: {mask_name}')
+
+def plot_chip_by_variable(experiment: 'HTBAMExperiment', analysis_name: str, variable: str):
+    '''
+    Plot a chip using arbitrary DataND object, by specifying the variable to plot.
+
+    Parameters:
+        experiment ('HTBAMExperiment'): the experiment object.
+        analysis_name (str): the name of the analysis to be plotted. (Data3D or Data2D)
+        variable (str): the variable to plot.
+
+    Returns:
+        None
+    '''
+
+    #plotting variable: We'll plot by luminance. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
+    data = experiment.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
+    
+    dtype = type(data)
+    assert dtype in [Data3D, Data2D], "data must be of type Data3D or Data2D."
+
+    mask_idx = data.dep_var_type.index(variable)
+
+    # If we're using a data2D
+    mask = data.dep_var[..., mask_idx] # (n_conc, n_chambers,)
+
+    # We want to plot the number of concentrations that pass the mask in each well.
+    # so, we'll sum across the concentration dimension, leaving an (n_chambers,) array
+
+    #passed_conc = np.sum(mask, axis=0)
+    #print(mask.shape)
+
+    #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
+    chamber_names = data.indep_vars.chamber_IDs # (n_chambers,)
+    sample_names =  data.indep_vars.sample_IDs # (n_chambers,)
+
+    # Create dictionary mapping chamber_id -> sample_name:
+    sample_names_dict = {}
+    for i, chamber_id in enumerate(chamber_names):
+        sample_names_dict[chamber_id] = sample_names[i]
+
+    # Create dictionary mapping chamber_id -> mean slopes:
+    mask_sum = {}
+    for i, chamber_id in enumerate(chamber_names):
+        if dtype == Data3D:
+            mask_sum[chamber_id] = mask[:, i].sum()  # sum across concentrations for each chamber
+        elif dtype == Data2D:
+            mask_sum[chamber_id] = mask[i].sum()
+
+    #plotting function: We'll generate a subplot for each chamber, showing the raw data and the linear regression line.
+    # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
+    
+    plot_chip(mask_sum, sample_names_dict, title=f'{variable}')
