@@ -46,6 +46,7 @@
 import numpy as np
 from copy import deepcopy
 import pint
+from htbam_db_api.units import units
 
 def transform_data(
     data_objs: list,        # list of Data2D, Data3D, Data4D instances (all same class and shape)
@@ -53,6 +54,7 @@ def transform_data(
     output_name: str,      # name of the new field, e.g. "difference"
     expression_vars: dict = None,  # optional mapping of name -> object to be available in expr
     keep_existing: bool = False,  # if True, keep existing dep_var fields and append/replace the new field
+    simplify_units: bool = True,
 ):
     """
     Return a new object of the same class as data_objs[0] in which:
@@ -114,7 +116,7 @@ def transform_data(
         __array_priority__ = 1000
 
         def __init__(self, arr, sample_ids):
-            self.arr = np.asarray(arr)
+            self.arr = arr
             self.sample_ids = np.asarray(sample_ids)
             if self.arr.shape[-1] != self.sample_ids.shape[0]:
                 raise ValueError("sample_IDs length must match chamber axis length")
@@ -150,7 +152,8 @@ def transform_data(
 
                 # Call the reduction function on the group along its last axis
                 res = func(*new_args, **kwargs2)
-                per_sample.append(np.asarray(res))
+                #per_sample.append(np.asarray(res))
+                per_sample.append(res)
 
             # Stack results into shape (..., n_samples, ...extra)
             stacked = np.stack(per_sample, axis=-1)
@@ -188,7 +191,8 @@ def transform_data(
             if field_name not in self._obj.dep_var_type:
                 raise AttributeError(field_name)
             idx = self._obj.dep_var_type.index(field_name)
-            arr = self._obj.dep_var[..., idx]
+            unit = self._obj.dep_var_units[idx]
+            arr = self._obj.dep_var[..., idx] * unit
             return GroupedField(arr, self._obj.indep_vars.sample_IDs)
 
     class DeviceField:
@@ -201,7 +205,8 @@ def transform_data(
         __array_priority__ = 1000
 
         def __init__(self, arr):
-            self.arr = np.asarray(arr)
+            # Np array or pint Quantity
+            self.arr = arr
 
         def _reduce_across_device(self, func, *args, **kwargs):
             # Default to axis=-1 (chamber axis) if not provided
@@ -218,7 +223,7 @@ def transform_data(
 
             # Call the reduction
             res = func(*new_args, **kwargs2)
-            res = np.asarray(res)
+            #res = np.asarray(res)
 
             # Figure out which axis the reduction used (normalize negative indices)
             axis_used = kwargs2.get('axis', None)
@@ -254,7 +259,7 @@ def transform_data(
                 # Insert chamber axis before any extra tail dims
                 insert_at = len(prefix)
                 expanded = np.expand_dims(res, axis=insert_at)
-                mapped = np.repeat(expanded, n_chambers, axis=insert_at)
+                mapped = expanded.repeat(n_chambers, axis=insert_at)
                 return mapped
 
             # Reduction wasn't along chamber axis — return as-is
@@ -284,7 +289,8 @@ def transform_data(
             if field_name not in self._obj.dep_var_type:
                 raise AttributeError(field_name)
             idx = self._obj.dep_var_type.index(field_name)
-            arr = self._obj.dep_var[..., idx]
+            unit = self._obj.dep_var_units[idx]
+            arr = self._obj.dep_var[..., idx] * unit
             return DeviceField(arr)
 
     class DataProxy:
@@ -302,7 +308,8 @@ def transform_data(
             # Return raw per-chamber array for dep_var fields
             if name in self._obj.dep_var_type:
                 idx = self._obj.dep_var_type.index(name)
-                return self._obj.dep_var[..., idx]
+                unit = self._obj.dep_var_units[idx]
+                return self._obj.dep_var[..., idx] * unit
             raise AttributeError(name)
 
     for i, obj in enumerate(data_objs):
@@ -350,6 +357,11 @@ def transform_data(
     except Exception as e:
         raise RuntimeError(f"Error evaluating expression {expr!r}: {e}")
 
+    # If it's a pint quantity, simplify the units:
+    if isinstance(result, pint.Quantity):
+        if simplify_units:
+            result = result.to_reduced_units()
+
     # 5) Ensure result is a NumPy array of the correct shape
     if not isinstance(result, np.ndarray) and not isinstance(result, pint.Quantity):
         result = np.array(result)
@@ -363,8 +375,12 @@ def transform_data(
 
     # 6) Expand the last axis so that new dep_var has final dim = 1
     new_transformed = result[..., np.newaxis]
-    new_transformed_units = result.units
-    new_transformed = new_transformed.magnitude # Proper way to convert to np array (without warnings)
+    
+    if isinstance(result, pint.Quantity):
+        new_transformed_units = result.units
+        new_transformed = new_transformed.magnitude # Proper way to convert to np array (without warnings)
+    else:
+        new_transformed_units = units.dimensionless
 
     # If caller wants to keep existing dep_vars, combine them with the new one
     if keep_existing:
