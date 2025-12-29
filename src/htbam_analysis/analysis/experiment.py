@@ -124,12 +124,13 @@ class HTBAMExperiment:
         )
         self.set_run(save_as, masked)
 
-
-    ### PLOTTING ###
     ### DATA EXPORT ###
-    def export_run_data_raw(self, run_name: str, output_dir: str = None):
+    def export_sample_vmax_data(self, run_name: str, output_dir: str = None, file_name: str = None):
         '''
-        Export per-chamber data to a CSV file, for Data2D objects.
+        Export per-sample vmax data to a CSV file, for Data2D objects.
+        This is an intermediate output step, before we divdie by [E] and output kcats.
+        Contains per-sample vmax, KM, replicate number (after filtering), and lists chambers IDs.
+
         Input:
             run_name (str): the name of the run to be exported.
             output_dir (str): the directory to save the CSV file. If None, uses current directory.
@@ -142,69 +143,366 @@ class HTBAMExperiment:
 
         if output_dir is None:
             output_dir = os.getcwd()
-        
-        # Create output directory if it doesn't exist
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        # Define the output file path
-        output_file = Path(output_dir) / f"{run_name}_data.csv"
 
-        chamber_IDs = run_data.indep_vars.chamber_IDs
-        sample_IDs = run_data.indep_vars.sample_IDs
-        
-        # Save the data to a CSV file
-        with open(output_file, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            header = ['chamber_ID', 'sample_ID'] + run_data.dep_var_type
-            writer.writerow(header)
-            for i in range(run_data.dep_var.shape[0]):
-                row = [chamber_IDs[i], sample_IDs[i]] + run_data.dep_var[i].tolist()
-                writer.writerow(row)
-        
-        print(f"Run data exported to {output_file}")
+        # Get sample names
+        sample_names = run_data.indep_vars.sample_IDs
+        unique_samples = np.unique(sample_names)
 
-    def export_run_data_processed(self, run_name: str, output_dir: str = None):
+        # Get units
+        vmax_units = f"{run_data.dep_var_units[0]:~}"
+        kM_units = f"{run_data.dep_var_units[1]:~}"
+
+        # New empty dataframe:
+        df = pd.DataFrame(columns=['sample', f'avg_v_max ({vmax_units})', f'avg_K_M ({kM_units})', 'avg_fit_R2', 'replicates', 'chamber_IDs'])
+
+        # Iterate over samples
+        for sample in unique_samples:
+            # Get indices of replicates for this sample
+            sample_indices = np.where(sample_names == sample)[0]
+
+            # Get rates for this sample
+            sample_vmax = run_data.dep_var[..., 0][sample_indices]
+            sample_kM = run_data.dep_var[..., 1][sample_indices]
+            sample_r2 = run_data.dep_var[..., 2][sample_indices]
+
+            # Get chamber IDs for this sample
+            sample_chamber_IDs = run_data.indep_vars.chamber_IDs[sample_indices]
+
+            # Get replicate number by counting non-nan values
+            replicate_number = np.count_nonzero(~np.isnan(sample_vmax))
+
+            nonnan_sample_chamber_IDs = sample_chamber_IDs[~np.isnan(sample_vmax)]
+
+            # Get average rate
+            if replicate_number > 0:
+                avg_vmax = np.nanmean(sample_vmax)
+                avg_kM = np.nanmean(sample_kM)
+                avg_r2 = np.nanmean(sample_r2)
+            else:
+                avg_vmax = np.nan
+                avg_kM = np.nan
+                avg_r2 = np.nan
+
+            # Append to dataframe
+            df = pd.concat([df, pd.DataFrame([{
+                'sample': sample,
+                f'avg_v_max ({vmax_units})': avg_vmax,
+                f'avg_K_M ({kM_units})': avg_kM,
+                'avg_fit_R2': avg_r2,
+                'replicates': replicate_number,
+                'chamber_IDs': nonnan_sample_chamber_IDs,
+            }])], ignore_index=True)
+
+        # Save to CSV
+        if file_name is None:
+            file_name = f'{run_name}_sample_rate_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+
+        print(f"Sample rate data exported to {output_dir}/{file_name}")
+
+
+    def export_chamber_vmax_data(self, run_name: str, enzyme_concentration_run_name: str, output_dir: str = None, file_name: str = None):
         '''
-        Export per-sample data to a CSV file, for Data2D objects.
+        Export per-chamber vmax data to a CSV file, for Data2D objects.
         Input:
             run_name (str): the name of the run to be exported.
+            enzyme_concentration_run_name (str): the name of the run with enzyme concentration data.
             output_dir (str): the directory to save the CSV file. If None, uses current directory.
+            file_name (str): the name of the file to save the CSV file. If None, uses run_name.
         Output:
             None
         '''
         run_data = self.get_run(run_name)
-        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
-        
-        sample_IDs = run_data.indep_vars.sample_IDs
-        chamber_IDs = run_data.indep_vars.chamber_IDs
 
-        # get the mean, std, and count for each value across each sample
-        sample_list = np.unique(sample_IDs)
-        sample_data = {sample: [] for sample in sample_list}
-        for i, sample in enumerate(sample_list):
-            sample_mask = (sample_IDs == sample)
-            sample_data[sample] = {
-                'chamber_IDs': chamber_IDs[sample_mask],
-                'mean': np.nanmean(run_data.dep_var[sample_mask], axis=0),
-                'std': np.nanstd(run_data.dep_var[sample_mask], axis=0),
-                'count': np.sum(~np.isnan(run_data.dep_var[sample_mask]), axis=0)
-            }
+        enzyme_concentration_data = self.get_run(enzyme_concentration_run_name)
+
+        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
 
         if output_dir is None:
             output_dir = os.getcwd()
-        # Create output directory if it doesn't exist
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        # Define the output file path
-        output_file = Path(output_dir) / f"{run_name}_processed_data.csv"
-        # Save the data to a CSV file
-        with open(output_file, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            header = ['sample_ID', 'chamber_IDs'] + run_data.dep_var_type
-            writer.writerow(header)
-            for sample, data in sample_data.items():
-                row = [sample, ','.join(data['chamber_IDs'].tolist())] + data['mean'].tolist()
-                writer.writerow(row)
-        print(f"Processed run data exported to {output_file}")
+
+        # Get sample names
+        chamber_names = run_data.indep_vars.chamber_IDs
+        sample_names = run_data.indep_vars.sample_IDs
+
+        # Get units
+        vmax_units = f"{run_data.dep_var_units[0]:~}"
+        kM_units = f"{run_data.dep_var_units[1]:~}"
+        E_units = f"{enzyme_concentration_data.dep_var_units[0]:~}"
+
+        # New empty dataframe:
+        df = pd.DataFrame(columns=['chamber', 'sample', f'v_max ({vmax_units})', f'K_M ({kM_units})', f'E_conc ({E_units})', 'fit_R2'])
+
+        # Iterate over samples
+        for chamber in chamber_names:
+            # Get indices of chambers for this sample
+            chamber_index = np.where(chamber_names == chamber)[0]
+
+            # Get rates for this sample
+            chamber_vmax = run_data.dep_var[..., 0][chamber_index][0]
+            chamber_kM = run_data.dep_var[..., 1][chamber_index][0]
+            chamber_r2 = run_data.dep_var[..., 2][chamber_index][0]
+
+            chamber_E_conc = enzyme_concentration_data.dep_var[..., 0][chamber_index][0]
+
+            # Append to dataframe
+            df = pd.concat([df, pd.DataFrame([{
+                'chamber': chamber,
+                'sample': sample_names[chamber_index],
+                f'v_max ({vmax_units})': chamber_vmax,
+                f'K_M ({kM_units})': chamber_kM,
+                f'E_conc ({E_units})': chamber_E_conc,
+                'fit_R2': chamber_r2,
+            }])], ignore_index=True)
+
+        # Save to CSV
+        if file_name is None:
+            file_name = f'{run_name}_chamber_rate_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+
+        print(f"Chamber rate data exported to {output_dir}/{file_name}")
+
+
+    
+
+    def export_MM_sample_data(self, run_name: str, enzyme_concentration_run_name: str, output_dir: str = None, file_name: str = None):
+        '''
+        Export per-sample kcat data to a CSV file.
+        Calculates kcat = vmax / [E] for each replicate, then averages.
+
+        Input:
+            run_name (str): the name of the run with vmax/Km data.
+            enzyme_concentration_run_name (str): the name of the run with enzyme concentration data.
+            output_dir (str): the directory to save the CSV file. If None, uses current directory.
+            file_name (str): the name of the file to save the CSV file. If None, uses run_name.
+        Output:
+            None
+        '''
+        run_data = self.get_run(run_name)
+        enzyme_concentration_data = self.get_run(enzyme_concentration_run_name)
+
+        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
+
+        if output_dir is None:
+            output_dir = os.getcwd()
+
+        # Get sample names
+        sample_names = run_data.indep_vars.sample_IDs
+        unique_samples = np.unique(sample_names)
+
+        # Get units
+        vmax_unit_obj = run_data.dep_var_units[0]
+        E_unit_obj = enzyme_concentration_data.dep_var_units[0]
+        kcat_unit_obj = run_data.dep_var_units[3]
+
+        vmax_units = f"{vmax_unit_obj:~}"
+        kM_units = f"{run_data.dep_var_units[1]:~}"
+        E_units = f"{E_unit_obj:~}"
+        kcat_units = f"{kcat_unit_obj:~}"
+
+        # New empty dataframe:
+        df = pd.DataFrame(columns=['sample', f'avg_k_cat ({kcat_units})', f'avg_K_M ({kM_units})', f'avg_E_conc ({E_units})', 'avg_fit_R2', 'replicates', 'chamber_IDs'])
+
+        # Iterate over samples
+        for sample in unique_samples:
+            # Get indices of replicates for this sample
+            sample_indices = np.where(sample_names == sample)[0]
+
+            # Get rates for this sample
+            sample_vmax = run_data.dep_var[..., 0][sample_indices]
+            sample_kM = run_data.dep_var[..., 1][sample_indices]
+            sample_r2 = run_data.dep_var[..., 2][sample_indices]
+            sample_kcat = run_data.dep_var[..., 3][sample_indices]
+            
+            # Get enzyme concentrations (assuming alignment)
+            sample_E_conc = enzyme_concentration_data.dep_var[..., 0][sample_indices]
+
+            # Get chamber IDs for this sample
+            sample_chamber_IDs = run_data.indep_vars.chamber_IDs[sample_indices]
+
+            # Get replicate number by counting non-nan values in kcat
+            replicate_number = np.count_nonzero(~np.isnan(sample_kcat))
+
+            nonnan_sample_chamber_IDs = sample_chamber_IDs[~np.isnan(sample_kcat)]
+
+            # Get average rate
+            if replicate_number > 0:
+                avg_kcat = np.nanmean(sample_kcat)
+                avg_kM = np.nanmean(sample_kM)
+                avg_E_conc = np.nanmean(sample_E_conc)
+                avg_r2 = np.nanmean(sample_r2)
+            else:
+                avg_kcat = np.nan
+                avg_kM = np.nan
+                avg_E_conc = np.nan
+                avg_r2 = np.nan
+
+            # Append to dataframe
+            df = pd.concat([df, pd.DataFrame([{
+                'sample': sample,
+                f'avg_k_cat ({kcat_units})': avg_kcat,
+                f'avg_K_M ({kM_units})': avg_kM,
+                f'avg_E_conc ({E_units})': avg_E_conc,
+                'avg_fit_R2': avg_r2,
+                'replicates': replicate_number,
+                'chamber_IDs': nonnan_sample_chamber_IDs,
+            }])], ignore_index=True)
+
+        # Save to CSV
+        if file_name is None:
+            file_name = f'{run_name}_sample_kcat_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+
+        print(f"Sample kcat data exported to {output_dir}/{file_name}")
+
+
+    def export_MM_chamber_data(self, run_name: str, enzyme_concentration_run_name: str, output_dir: str = None, file_name: str = None):
+        '''
+        Export per-chamber kcat data to a CSV file.
+        Calculates kcat = vmax / [E].
+
+        Input:
+            run_name (str): the name of the run to be exported.
+            enzyme_concentration_run_name (str): the name of the run with enzyme concentration data.
+            output_dir (str): the directory to save the CSV file. If None, uses current directory.
+            file_name (str): the name of the file to save the CSV file. If None, uses run_name.
+        Output:
+            None
+        '''
+        run_data = self.get_run(run_name)
+        enzyme_concentration_data = self.get_run(enzyme_concentration_run_name)
+
+        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
+
+        if output_dir is None:
+            output_dir = os.getcwd()
+
+        # Get sample names
+        chamber_names = run_data.indep_vars.chamber_IDs
+        sample_names = run_data.indep_vars.sample_IDs
+
+        # Get units
+        vmax_unit_obj = run_data.dep_var_units[0]
+        E_unit_obj = enzyme_concentration_data.dep_var_units[0]
+        kcat_unit_obj = run_data.dep_var_units[3]
+
+        kcat_units = f"{kcat_unit_obj:~}"
+        kM_units = f"{run_data.dep_var_units[1]:~}"
+        E_units = f"{E_unit_obj:~}"
+
+        # New empty dataframe:
+        df = pd.DataFrame(columns=['chamber', 'sample', f'k_cat ({kcat_units})', f'K_M ({kM_units})', f'E_conc ({E_units})', 'fit_R2'])
+
+        # Iterate over chambers
+        for chamber in chamber_names:
+            # Get indices of chambers for this sample
+            chamber_index = np.where(chamber_names == chamber)[0]
+
+            # Get rates for this sample
+            chamber_vmax = run_data.dep_var[..., 0][chamber_index][0]
+            chamber_kM = run_data.dep_var[..., 1][chamber_index][0]
+            chamber_r2 = run_data.dep_var[..., 2][chamber_index][0]
+            chamber_kcat = run_data.dep_var[..., 3][chamber_index][0]
+
+            chamber_E_conc = enzyme_concentration_data.dep_var[..., 0][chamber_index][0]
+
+            # Append to dataframe
+            df = pd.concat([df, pd.DataFrame([{
+                'chamber': chamber,
+                'sample': sample_names[chamber_index][0],
+                f'k_cat ({kcat_units})': chamber_kcat,
+                f'K_M ({kM_units})': chamber_kM,
+                f'E_conc ({E_units})': chamber_E_conc,
+                'fit_R2': chamber_r2,
+            }])], ignore_index=True)
+
+        # Save to CSV
+        if file_name is None:
+            file_name = f'{run_name}_chamber_kcat_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+
+        print(f"Chamber kcat data exported to {output_dir}/{file_name}")
+
+
+    ### These are the old output functions - I will remove them in a future update
+    # def export_run_data_raw(self, run_name: str, output_dir: str = None):
+    #     '''
+    #     Export per-chamber data to a CSV file, for Data2D objects.
+    #     Input:
+    #         run_name (str): the name of the run to be exported.
+    #         output_dir (str): the directory to save the CSV file. If None, uses current directory.
+    #     Output:
+    #         None
+    #     '''
+    #     run_data = self.get_run(run_name)
+
+    #     assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
+
+    #     if output_dir is None:
+    #         output_dir = os.getcwd()
+        
+    #     # Create output directory if it doesn't exist
+    #     Path(output_dir).mkdir(parents=True, exist_ok=True)
+        
+    #     # Define the output file path
+    #     output_file = Path(output_dir) / f"{run_name}_data.csv"
+
+    #     chamber_IDs = run_data.indep_vars.chamber_IDs
+    #     sample_IDs = run_data.indep_vars.sample_IDs
+        
+    #     # Save the data to a CSV file
+    #     with open(output_file, 'w', newline='') as csvfile:
+    #         writer = csv.writer(csvfile)
+    #         header = ['chamber_ID', 'sample_ID'] + run_data.dep_var_type
+    #         writer.writerow(header)
+    #         for i in range(run_data.dep_var.shape[0]):
+    #             row = [chamber_IDs[i], sample_IDs[i]] + run_data.dep_var[i].tolist()
+    #             writer.writerow(row)
+        
+    #     print(f"Run data exported to {output_file}")
+
+    # def export_run_data_processed(self, run_name: str, output_dir: str = None):
+    #     '''
+    #     Export per-sample data to a CSV file, for Data2D objects.
+    #     Input:
+    #         run_name (str): the name of the run to be exported.
+    #         output_dir (str): the directory to save the CSV file. If None, uses current directory.
+    #     Output:
+    #         None
+    #     '''
+    #     run_data = self.get_run(run_name)
+    #     assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
+        
+    #     sample_IDs = run_data.indep_vars.sample_IDs
+    #     chamber_IDs = run_data.indep_vars.chamber_IDs
+
+    #     # get the mean, std, and count for each value across each sample
+    #     sample_list = np.unique(sample_IDs)
+    #     sample_data = {sample: [] for sample in sample_list}
+    #     for i, sample in enumerate(sample_list):
+    #         sample_mask = (sample_IDs == sample)
+    #         sample_data[sample] = {
+    #             'chamber_IDs': chamber_IDs[sample_mask],
+    #             'mean': np.nanmean(run_data.dep_var[sample_mask], axis=0),
+    #             'std': np.nanstd(run_data.dep_var[sample_mask], axis=0),
+    #             'count': np.sum(~np.isnan(run_data.dep_var[sample_mask]), axis=0)
+    #         }
+
+    #     if output_dir is None:
+    #         output_dir = os.getcwd()
+    #     # Create output directory if it doesn't exist
+    #     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    #     # Define the output file path
+    #     output_file = Path(output_dir) / f"{run_name}_processed_data.csv"
+    #     # Save the data to a CSV file
+    #     with open(output_file, 'w', newline='') as csvfile:
+    #         writer = csv.writer(csvfile)
+    #         header = ['sample_ID', 'chamber_IDs'] + run_data.dep_var_type
+    #         writer.writerow(header)
+    #         for sample, data in sample_data.items():
+    #             row = [sample, ','.join(data['chamber_IDs'].tolist())] + data['mean'].tolist()
+    #             writer.writerow(row)
+    #     print(f"Processed run data exported to {output_file}")
 
     def export_mm_subplots(self,
                            analysis_name: str,
