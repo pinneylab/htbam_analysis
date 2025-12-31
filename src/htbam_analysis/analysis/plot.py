@@ -373,6 +373,7 @@ def plot_standard_curve_chip(experiment: 'HTBAMExperiment', analysis_name: str, 
     plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
 
 def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, experiment_name: str, skip_start_timepoint: bool = True,
+                            fit_points_mask: str = None,
                             plot_xmax: float = None, plot_ymax: float = None,
                             plot_xmin: float = None, plot_ymin: float = None):
     '''
@@ -391,6 +392,8 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
     
     experiment_data = experiment.get_run(experiment_name) # Raw data from experiment (to show datapoints)
     analysis_data = experiment.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
+    if fit_points_mask is not None:
+        fit_points_data = experiment.get_run(fit_points_mask)
     
     # Extract slopes and intercepts from analysis data
     slopes_idx = analysis_data.dep_var_type.index('slope')          # index of slope in dep_vars
@@ -410,6 +413,11 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
     product_conc_idx = experiment_data.dep_var_type.index('concentration')  # index of luminance in dep_vars
     product_conc_unit = experiment_data.dep_var_units[product_conc_idx]
     product_conc = experiment_data.dep_var[..., product_conc_idx] * product_conc_unit  # (n_chambers, n_timepoints, n_conc)
+    if fit_points_mask is not None:
+        points_to_plot = fit_points_data.dep_var[:,:,:,0] # (n_chambers, n_timepoints, n_conc)
+    else:
+        points_to_plot = np.ones(product_conc.shape, dtype=bool)
+
     substrate_conc = experiment_data.indep_vars.concentration # (n_conc,)
     time_data = experiment_data.indep_vars.time # (n_conc, n_timepoints)
 
@@ -417,7 +425,7 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
     if skip_start_timepoint:
         product_conc = product_conc[:, 1:, :] # (n_chambers, n_timepoints-1, n_conc)
         time_data = time_data[:, 1:] # (n_conc, n_timepoints-1)
-        #slopes_to_plot = slopes_to_plot[:, 1:]
+        points_to_plot = points_to_plot[:, 1:, :] # (n_chambers, n_timepoints-1, n_conc)
     
     #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
     #chamber_names_dict = experiment._db_conn.get_chamber_name_dict()
@@ -444,6 +452,12 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
         #data_index = list(experiment._run_data[run_name]["chamber_idxs"]).index(chamber_id)
         x_data = time_data # same for all chambers              (n_timepoints, n_conc)
         y_data = product_conc[:, :, chamber_names == chamber_id]  #(n_timepoints, n_conc)
+
+        y_data_mask = points_to_plot[:, :, chamber_names == chamber_id][:,:,0] # (n_timepoints, n_conc)
+        # Make y_data_mask a boolean array:
+        y_data_mask = y_data_mask > 0
+        x_data_masked = np.where(y_data_mask, x_data, np.nan)
+        y_data_masked = np.where(y_data_mask[..., np.newaxis], y_data, np.nan)
     
         m = slopes_to_plot[:, chamber_names == chamber_id]
         b = intercepts_to_plot[:, chamber_names == chamber_id]
@@ -453,6 +467,10 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
         for i in range(y_data.shape[0]): #over each substrate concentration:
 
             ax.scatter(x_data[i], y_data[i,:].flatten(), color=colors[i], alpha=0.3) # raw data
+
+            # Plot the fit points with alpha=1
+            ax.scatter(x_data_masked[i], y_data_masked[i,:].flatten(), color=colors[i], alpha=1)
+            
             ax.plot(x_data[i], m[i]*x_data[i] + b[i], color=colors[i], alpha=1, linewidth=2, label=f'{substrate_conc[i]:~}')  # fitted line
 
         # Set axis limits if provided

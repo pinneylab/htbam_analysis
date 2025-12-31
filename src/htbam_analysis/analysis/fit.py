@@ -8,6 +8,7 @@ import inspect
 
 from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
 from htbam_db_api.units.units import units as ureg
+from htbam_analysis.analysis.filter import make_custom_mask
 
 from pint.errors import DimensionalityError
 
@@ -79,6 +80,7 @@ def inhibition_model(x, r_max, r_min, ic50):
 
 ### Fitting functions for DB objects:
 def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1,
+                              max_reaction_percent: float = 100,
                               fit_windows_per_concentration: dict = None) -> Data3D:
     """
     Fit y = β0 + β1·x with scikit-learn, returning slope & intercept
@@ -95,6 +97,10 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
         First timepoint to include in the fit (default 0).
     end_timepoint : int, optional
         Last timepoint to include in the fit (default -1, i.e. all points).
+    max_reaction_percent : float, optional
+        Maximum reaction percentage to include in the fit (default 100).
+        This is applied per-concentration, by calculating the max (usually final) product concentration.
+        If the max reaction percentage is less than 100%, the fit will only include timepoints up to the point where the product reaches the max reaction percentage.
     fit_windows_per_concentration : dict, optional
         Dictionary mapping concentration values to (start, end) timepoint tuples.
         If provided, these override start_timepoint and end_timepoint for each concentration.
@@ -172,11 +178,6 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
             s, e = int(v[0]), int(v[1])
             per_conc_windows[float(kf)] = (s, e)
 
-    # What subset of points are we fitting on? If per-concentration windows provided, we'll slice inside the loop.
-    if per_conc_windows is None:
-        RFU_for_fitting = Y[:, start_timepoint:end_timepoint, :]  # skip the first couple points, because we get weird values
-        time_array_for_fitting = T[:, start_timepoint:end_timepoint]  # skip the first couple points, because we get weird values
-
     for i in range(n_conc):
         # If per-concentration windows were provided, use them for this concentration
         if per_conc_windows is not None:
@@ -185,8 +186,34 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
             Xi = T[i, start_idx:end_idx].reshape(-1, 1)          # (Ti, 1)
             yi = Y[i, start_idx:end_idx, :]                      # (Ti, K)
         else:
-            Xi = time_array_for_fitting[i].reshape(-1, 1)          # (Ti, 1)
-            yi = RFU_for_fitting[i]                          # (Ti, K)
+            ### NF: Want to the new max_reaction_percent logic more thoroughly
+            # Default window if no per-concentration windows are provided
+            Xi = T[i, start_timepoint:end_timepoint].reshape(-1, 1)          # (Ti, 1)
+            yi = Y[i, start_timepoint:end_timepoint, :]                      # (Ti, K)
+
+            if max_reaction_percent < 100:
+                # Calculate max product concentration (averaged across chambers!) for this concentration
+                # Here, we're averaging across timepoints, then taking the max of the average.
+                # May not be perfect but could clear up some noise!
+                mean_trace = np.nanmean(Y[i], axis=1)
+                max_val = np.nanmax(mean_trace)
+                min_val = np.nanmin(mean_trace)
+                cutoff_val = min_val + (max_val - min_val) * (max_reaction_percent / 100.0)
+
+                # Find the first timepoint where the mean trace exceeds the cutoff
+                exceed_indices = np.where(mean_trace > cutoff_val)[0]
+                if exceed_indices.size > 0:
+                    global_cutoff_idx = exceed_indices[0]
+                    # Convert to local index relative to the fitting window start
+                    local_cutoff_idx = global_cutoff_idx - start_timepoint
+                    
+                    # Apply cutoff if it falls within the current window
+                    if local_cutoff_idx < Xi.shape[0]:
+                        # Ensure we don't have a negative slice if cutoff is before start
+                        slice_end = max(0, local_cutoff_idx)
+                        Xi = Xi[:slice_end]
+                        yi = yi[:slice_end]
+            ######################################
 
         # 1. keep chambers that have *no* NaNs over time
         good_chamb = ~np.isnan(yi).any(axis=0)     # (K,) boolean mask
@@ -224,6 +251,201 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
     print('Elapsed', np.round(elapsed, 3), 'seconds.')
 
     return output_data
+
+### Fitting functions for DB objects:
+def fit_concentration_vs_time_2(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1,
+                              max_reaction_percent: float = 100,
+                              fit_windows_per_concentration: dict = None) -> Data3D:
+    """
+    Fit y = β0 + β1·x with scikit-learn, returning slope & intercept
+    in a data-dict that mirrors the original structure.
+
+    Parameters
+    ----------
+    data : Data4D
+        Data object in Data4D format (see htbam_db_api.data).
+    min_pts : int, optional
+        Minimum number of (x, y) pairs required for a fit
+        (default 2).
+    start_timepoint : int, optional
+        First timepoint to include in the fit (default 0).
+    end_timepoint : int, optional
+        Last timepoint to include in the fit (default -1, i.e. all points).
+    max_reaction_percent : float, optional
+        Maximum reaction percentage to include in the fit (default 100).
+        This is applied per-concentration, by calculating the max (usually final) product concentration.
+        If the max reaction percentage is less than 100%, the fit will only include timepoints up to the point where the product reaches the max reaction percentage.
+    fit_windows_per_concentration : dict, optional
+        Dictionary mapping concentration values to (start, end) timepoint tuples.
+        If provided, these override start_timepoint and end_timepoint for each concentration.
+
+    Returns
+    -------
+    result : Data3D
+        Data object with dep_var of shape (n_conc, n_chamb, 3) containing:
+    - slope
+    - intercept
+    - r_squared
+    """
+    start = time.time()
+    
+    assert type(data) == Data4D, f"Data type {type(data)} not supported. Requires 'Data4D' format."
+    
+    indep = data.indep_vars  # (n_conc, n_time)
+    dep   = data.dep_var
+
+    x_label = "time"
+    y_label = "concentration"
+
+    if y_label not in data.dep_var_type:
+        raise KeyError(f"'{y_label}' not in data.dep_var_type.")
+    # if x not in data.indep_vars:
+    #     raise KeyError(f"'{x}' not in data.indep_vars.")
+
+    y_idx = data.dep_var_type.index(y_label)
+
+    # Unit handling
+    x_unit = indep.time.units
+    y_unit = data.dep_var_units[y_idx]
+
+    slope_unit = y_unit / x_unit
+    intercept_unit = y_unit
+    r_squared_unit = ureg.dimensionless
+
+    Y = dep[..., y_idx]                              # (n_conc , n_time , n_chamb)
+    if hasattr(Y, 'magnitude'): Y = Y.magnitude
+
+    n_conc, n_time, n_chamb = Y.shape
+    model = LinearRegression()
+
+    T = indep.time                                   # (n_conc , n_time)
+    if hasattr(T, 'magnitude'): T = T.magnitude
+
+    slope     = np.full((n_conc, n_chamb), np.nan, dtype=float)
+    intercept = np.full_like(slope, np.nan)
+    r_squared = np.full_like(slope, np.nan)
+
+    # If user provided per-concentration fit windows, validate them and prepare a mapping
+    concs = indep.concentration
+    if hasattr(concs, 'magnitude'):
+        concs = concs.magnitude
+    concs = np.asarray(concs)
+
+    # Create an array to store the mask that indicates which points are included in the fit
+    raw_fit_mask = np.ones(Y.shape) * True
+
+    per_conc_windows = None
+    if fit_windows_per_concentration is not None:
+        if not isinstance(fit_windows_per_concentration, dict):
+            raise TypeError("fit_windows_per_concentration must be a dict mapping concentration -> (start, end)")
+
+        # Ensure every concentration in data has an entry in the provided dict
+        missing = [float(c) for c in concs if float(c) not in map(float, fit_windows_per_concentration.keys())]
+        if len(missing) > 0:
+            raise KeyError(f"fit_windows_per_concentration missing windows for concentrations: {missing}")
+
+        # Normalize and validate windows
+        per_conc_windows = {}
+        for k, v in fit_windows_per_concentration.items():
+            try:
+                kf = float(k)
+            except Exception:
+                raise KeyError(f"Invalid concentration key: {k}")
+            if not (isinstance(v, (list, tuple)) and len(v) == 2):
+                raise ValueError(f"Window for concentration {k} must be a (start, end) tuple")
+            s, e = int(v[0]), int(v[1])
+            per_conc_windows[float(kf)] = (s, e)
+            
+    # Apply the default time window to the mask:
+    raw_fit_mask[:, :start_timepoint, :] = False
+    raw_fit_mask[:, end_timepoint:, :] = False
+    
+    # Apply the per-concentration windows to the mask
+    for i in range(n_conc):
+        if per_conc_windows is not None:
+            print(f"Applying per-concentration window for concentration {concs[i]}: {per_conc_windows[concs[i]]}")
+            conc_val = float(concs[i])
+            start_idx, end_idx = per_conc_windows[conc_val]
+            # everything outside the range becomes false:
+            raw_fit_mask[i, :start_idx, :] = False
+            raw_fit_mask[i, end_idx:, :] = False
+
+    # For each chamber at each concentration, calcualte the apply the max_reaction_percent mask:
+    for i in range(n_conc):
+        for j in range(n_chamb):
+            if max_reaction_percent < 100:
+                # Calculate max product concentration (just in this chamber!) for this concentration
+                trace = Y[i, :, j]
+                max_val = np.nanmax(trace)
+                min_val = np.nanmin(trace)
+                cutoff_val = min_val + (max_val - min_val) * (max_reaction_percent / 100.0)
+
+                # Find the first timepoint where the trace exceeds the cutoff
+                #print()
+                #print(trace)
+                #print(cutoff_val)
+                exceed_indices = np.where(trace > cutoff_val)[0]
+                #print(exceed_indices)
+
+                if exceed_indices.size == 0:
+                    continue
+
+                # everything that exceeds the max reaction percent becomes false:
+                raw_fit_mask[i, exceed_indices, j] = False
+
+    # Finally, apply the mask to the data before fitting:
+    # Y should be nan where mask is False:
+    Y_masked = np.where(raw_fit_mask, Y, np.nan)
+
+    for i in range(n_conc):
+        for j in range(n_chamb):
+            Xi = T[i, :].reshape(-1, 1)          # (Ti, 1)
+            yi = Y_masked[i, :, j]                      # (Ti, K)
+
+            #print()
+            #print(Y[i, :, j])
+            #print(yi.shape)
+            #print(yi)
+            
+            # Remove NaNs from the data
+            good_rows = ~np.isnan(yi)
+            Xi_c, y_good_c = Xi[good_rows], yi[good_rows]
+            
+            if not good_rows.any():                   # nothing left to fit
+                continue
+
+            # print(Xi_c)
+            # print(y_good_c)
+
+            # Are there fewer than 2 points?
+            if len(y_good_c) < 2:
+                continue
+
+            # 3. multi-output linear regression
+            model.fit(Xi_c, y_good_c)
+            intercept[i, j] = model.intercept_      # (K_good,)
+            slope[i, j]     = model.coef_[0]     # (K_good,)
+            r_squared[i, j] = model.score(Xi_c, y_good_c)  # R² for each chamber
+
+    output_data = Data3D(
+        indep_vars=deepcopy(data.indep_vars),
+        dep_var=np.stack((slope, intercept, r_squared), axis=-1),  # (n_conc, n_chamb, 3)
+        dep_var_type=["slope", "intercept", "r_squared"],
+        dep_var_units=[slope_unit, intercept_unit, r_squared_unit],
+        meta=data.meta
+    )
+    n_conc = indep.time.shape[0]  # number of concentrations
+    n_chamb = indep.chamber_IDs.shape[0]  # number of chambers
+
+    # Reshape raw_fit_mask to have an extra dimension
+    raw_fit_mask = raw_fit_mask[:, :, :, np.newaxis]
+    fit_points_mask = make_custom_mask(data, raw_fit_mask, info='points chosen for linear fit')
+
+    elapsed = time.time() - start
+    print(f'Fit slopes for {n_chamb} wells at {n_conc} concentrations.')
+    print('Elapsed', np.round(elapsed, 3), 'seconds.')
+
+    return output_data, fit_points_mask
 
 def fit_luminance_vs_concentration(data: Data4D, *, min_pts: int = 2, timepoint: int = -1) -> Data2D:
     """
