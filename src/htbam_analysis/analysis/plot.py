@@ -4,11 +4,24 @@ import base64
 import tempfile
 import matplotlib.pyplot as plt
 import numpy as np
+import socket
 
 # Utilities
 from typing import TYPE_CHECKING, List, Dict, Optional, Any
 if TYPE_CHECKING:
     from htbam_analysis.analysis.experiment import HTBAMExperiment
+
+def find_free_port(start_port=8050):
+    port = start_port
+    attempts = 0
+    while attempts < 50:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            # Check if port is in use
+            if s.connect_ex(('localhost', port)) != 0:
+                return port
+            port += 1
+            attempts += 1
+    raise Exception("No free ports found in range 8050-8100")
 
 # HTBAM Data
 from htbam_db_api.data import Data4D, Data3D, Data2D
@@ -232,7 +245,9 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
                 html.Img(src=img_src, style={"width": "100%"})
             ])
 
-    app.run_server()
+    free_port = find_free_port()
+    print(f"Running on port: {free_port}")
+    app.run_server(port=free_port)
 
 def plot_chip_by_variable(experiment: 'HTBAMExperiment', analysis_name: str, variable: str):
     '''

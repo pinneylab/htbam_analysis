@@ -310,6 +310,11 @@ def transform_data(
                 idx = self._obj.dep_var_type.index(name)
                 unit = self._obj.dep_var_units[idx]
                 return self._obj.dep_var[..., idx] * unit
+            
+            # Expose chamber_IDs and sample_IDs from indep_vars
+            if name in ["chamber_IDs", "sample_IDs"]:
+                return getattr(self._obj.indep_vars, name)
+
             raise AttributeError(name)
 
     for i, obj in enumerate(data_objs):
@@ -368,10 +373,14 @@ def transform_data(
 
     expected_shape = base_shape[:-1]
     if result.shape != expected_shape:
-        raise ValueError(
-            f"After evaluating {expr!r}, got result.shape = {result.shape}, "
-            f"but expected {expected_shape}."
-        )
+        try:
+            # Attempt to broadcast to the expected shape (e.g. broadcasting chamber-level data to time-level)
+            result = np.broadcast_to(result, expected_shape)
+        except ValueError:
+             raise ValueError(
+                f"After evaluating {expr!r}, got result.shape = {result.shape}, "
+                f"but expected {expected_shape} (and broadcasting failed)."
+            )
 
     # 6) Expand the last axis so that new dep_var has final dim = 1
     new_transformed = result[..., np.newaxis]
