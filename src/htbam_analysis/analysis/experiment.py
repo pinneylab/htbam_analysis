@@ -504,27 +504,32 @@ class HTBAMExperiment:
     #             writer.writerow(row)
     #     print(f"Processed run data exported to {output_file}")
 
-    def export_mm_subplots(self,
+    def export_mm_subplots_by_chamber(self,
                            analysis_name: str,
                            model_fit_name: str,
                            export_path: str,
+                           dep_var_label: str = 'slope',
                            model_pred_data_name: str = None,
+                           dpi: int = 100,
                            x_log: bool = False,
                            y_log: bool = False):
         '''
         Export a PDF of Michaelis-Menten subplots for each chamber in a 32x56 grid.
+        Plots a 95% confidence interval over the replicates for that chamber in gray.
         
         Input:
             analysis_name (str): Name of the analysis run (Data3D).
             model_fit_name (str): Name of the fit run (Data2D).
-            export_path (str): Path to save the generated PDF.
+            export_path (str): Path to save the generated PDF. Also can be a list of paths (if you want to save a PNG and PDF, for example)
+            dep_var_label (str): Label of the dependent variable to plot (default "slope").
             model_pred_data_name (str): Optional name of prediction run (Data3D).
+            dpi (int): DPI for the exported image.
             x_log (bool): If True, use log scale for Concentration.
             y_log (bool): If True, use log scale for Initial Rate.
         '''
         # 1. Fetch Data
         analysis: Data3D = self.get_run(analysis_name)
-        si = analysis.dep_var_type.index("slope")
+        si = analysis.dep_var_type.index(dep_var_label)
         slope_unit = analysis.dep_var_units[si]
         slopes = analysis.dep_var[..., si] * slope_unit  # (n_conc, n_chambers)
         conc   = analysis.indep_vars.concentration       # (n_conc,)
@@ -573,20 +578,40 @@ class HTBAMExperiment:
                 # Plot content
                 x_data = conc
                 y_data = slopes[:, idx].flatten()
-                ax.scatter(x_data, y_data, alpha=0.7, s=15, label='data') 
+
+                # Robust unit handling for plotting
+                if hasattr(x_data, 'magnitude'): x_data = x_data.magnitude
+                if hasattr(y_data, 'magnitude'): y_data = y_data.magnitude
                 
-                if preds is not None:
-                     # CI Logic
-                    sample = sample_names[cid]
-                    same_idxs = [i for i, s in enumerate(samples) if s == sample]
-                    y_all = preds[:, same_idxs]
-                    
-                    y_min = np.nanpercentile(y_all, 2.5, axis=1)
-                    y_max = np.nanpercentile(y_all, 97.5, axis=1)
-                    
-                    y_p = preds[:, idx].flatten()
-                    ax.plot(x_data, y_p, color='red', linewidth=1, label='fit')
-                    ax.fill_between(x_data, y_min, y_max, color='gray', alpha=0.3, label='95% CI')
+                chamb_idx_arr = np.where(chambers == cid)[0]
+                chamb_idx = chamb_idx_arr[0]
+                vals = fit_vals[chamb_idx]
+
+                ax.set_title(f"{cid}: {sample_names[cid]}", fontsize=8)
+                ax.set_xlabel(f"Conc ({conc.units:~})", fontsize=6)
+                ax.set_ylabel(f"Rate ({slopes.units:~})", fontsize=6)
+
+                if preds is None or np.isnan(vals).all():
+                    continue
+
+                ax.scatter(x_data, y_data, alpha=0.7, s=15, label='data') 
+
+                # CI Logic
+                sample = sample_names[cid]
+                same_idxs = [i for i, s in enumerate(samples) if s == sample]
+                y_all = preds[:, same_idxs]
+                
+                y_min = np.nanpercentile(y_all, 2.5, axis=1)
+                y_max = np.nanpercentile(y_all, 97.5, axis=1)
+                y_p = preds[:, idx].flatten()
+
+                # Robust unit handling for predictions
+                if hasattr(y_p, 'magnitude'): y_p = y_p.magnitude
+                if hasattr(y_min, 'magnitude'): y_min = y_min.magnitude
+                if hasattr(y_max, 'magnitude'): y_max = y_max.magnitude
+                
+                ax.plot(x_data, y_p, color='red', linewidth=1, label='fit')
+                ax.fill_between(x_data, y_min, y_max, color='gray', alpha=0.3, label='95% CI')
                 
                 # Fit params text
                 # We need to find the index of this chamber in the fit data
@@ -610,8 +635,14 @@ class HTBAMExperiment:
         plt.tight_layout()
         # Ensure directory exists
         tqdm.write(f"Exporting MM subplots to {export_path}")
-        Path(export_path).parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(export_path, dpi=100)
+
+        if type(export_path) == str:
+            Path(export_path).parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(export_path, dpi=dpi)
+        elif type(export_path) == list:
+            for path in export_path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(path, dpi=dpi)
         plt.close(fig)
         print(f"Exported MM subplots to {export_path}")
 
@@ -622,6 +653,8 @@ class HTBAMExperiment:
                            export_path: str,
                            dep_var_label: str = 'slope',
                            model_pred_data_name: str = None,
+                           hide_excluded_samples: bool = False,
+                           dpi: int = 100,
                            x_log: bool = False,
                            y_log: bool = False):
         '''
@@ -635,8 +668,10 @@ class HTBAMExperiment:
         Input:
             analysis_name (str): Name of the analysis run (Data3D).
             model_fit_name (str): Name of the fit run (Data2D).
-            export_path (str): Path to save the generated PDF.
+            export_path (str): Path to save the generated PDF. Can also be a list of paths (if you want to save a PNG and PDF, for example)
             model_pred_data_name (str): Optional name of prediction run (Data3D).
+            hide_excluded_samples (bool): If True, exclude samples with missing replicates.
+            dpi (int): DPI for the exported image.
             x_log (bool): If True, use log scale for Concentration.
             y_log (bool): If True, use log scale for Initial Rate.
         '''
@@ -672,7 +707,7 @@ class HTBAMExperiment:
         n_samples = len(unique_samples)
         
         # Let's try to make a somewhat square grid, or use the standard 8x12 plate layout if it matches
-        ncols = 8
+        ncols = 3
         nrows = int(np.ceil(n_samples / ncols))
         
         fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 4*nrows), squeeze=False)
@@ -680,7 +715,9 @@ class HTBAMExperiment:
         tqdm.write("Plotting samples...")
         
         # 3. Iterate and Plot
+        skipped_samples = []
         for i, sample in enumerate(tqdm(unique_samples)):
+            i = i - len(skipped_samples)
             row = i // ncols
             col = i % ncols
             ax = axes[row, col]
@@ -705,8 +742,6 @@ class HTBAMExperiment:
                  y = mean_rates
                  yerr = std_rates
                  x = conc
-            
-            ax.errorbar(x, y, yerr=yerr, fmt='o', capsize=3, label='mean rate', color='blue')
 
             # --- Aggregating Fit Parameters ---
             sample_kcats = all_kcats[indices]
@@ -720,6 +755,15 @@ class HTBAMExperiment:
             
             kcat_up = mean_kcat + kcat_stdev
             kcat_down = mean_kcat - kcat_stdev
+
+            if hide_excluded_samples:
+                if np.isnan(mean_kcat.magnitude):
+                    print(f"Sample {sample} has no (non-NaN) replicates. Skipping.")
+                    skipped_samples.append(sample)
+                    continue
+
+            # Plotting rates
+            ax.errorbar(x, y, yerr=yerr, fmt='o', capsize=3, label='mean rate', color='blue')
             
             # --- Generating Prediction Lines ---
             # mm_model(S, Vmax, Km) -> here we treat Vmax as kcat because likely normalized
@@ -785,7 +829,14 @@ class HTBAMExperiment:
 
         plt.tight_layout()
         tqdm.write(f"Exporting MM subplots by sample to {export_path}")
-        Path(export_path).parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(export_path, dpi=100)
+        
+        if type(export_path) == str:
+            Path(export_path).parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(export_path, dpi=dpi)
+        elif type(export_path) == list:
+            for path in export_path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(path, dpi=dpi)
+        
         plt.close(fig)
         print(f"Exported MM subplots by sample to {export_path}")
