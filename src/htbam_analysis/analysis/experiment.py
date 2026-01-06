@@ -655,6 +655,7 @@ class HTBAMExperiment:
                            model_pred_data_name: str = None,
                            hide_excluded_samples: bool = False,
                            dpi: int = 100,
+                           aspect_ratio: float = 1.5,
                            x_log: bool = False,
                            y_log: bool = False):
         '''
@@ -710,7 +711,10 @@ class HTBAMExperiment:
         ncols = 3
         nrows = int(np.ceil(n_samples / ncols))
         
-        fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 4*nrows), squeeze=False)
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, (4/aspect_ratio)*nrows), squeeze=False)
+        # Set aspect ratio to 1.25:1, which allows for 3x5 plots on a 8.5/11 page:
+        for ax in axes.flatten():
+            ax.set_box_aspect(1/aspect_ratio)   
         
         tqdm.write("Plotting samples...")
         
