@@ -16,15 +16,15 @@ This is a *WORK IN PROGRESS* package for processing and analysing various assays
 
 ### Conda Environment Setup
 
-(Recommended) Create a fresh conda environment with python=3.9 using:
+(Recommended) Create a fresh conda environment with python=3.12 using:
 
-```conda create -n htbam_analysis python=3.9```
+```conda create -n htbam_analysis python=3.12```
 
 and activate using:
 
 ```conda activate htbam_analysis```
 
-#### Intall Stable Release via Wheel File
+#### Install Stable Release via Wheel File
 Download the latest wheel file from the [Release Page](https://github.com/pinneylab/htbam_analysis/releases)
 
 Then, install the package to your conda environment using:
