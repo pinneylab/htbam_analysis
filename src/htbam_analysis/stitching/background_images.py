@@ -135,3 +135,13 @@ class BackgroundImages:
                     if manual_exposure:  # in case filenames corrupted
                         exposure = manual_exposure
                     self.subtract_background(file, index, channel, int(exposure))
+
+
+def backgroud_subtract(background_image, target_image):
+
+    subtracted = np.subtract(target_image.astype("float"), background_image.astype("float"))
+
+    # TODO figure out why these params are set this way
+    subtracted_clipped = np.clip(subtracted, 0, 65535).astype("uint16")
+    
+    return subtracted_clipped

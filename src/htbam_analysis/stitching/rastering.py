@@ -1,17 +1,15 @@
 import numpy as np
 import pathlib
-import os
 import logging
 from skimage import io, transform
 from abc import abstractmethod, ABC
-from htbam_analysis.stitching.rastering.raster_params import RasterParams
-from PIL import Image, ImageSequence
-from tqdm import tqdm
 from matplotlib import pyplot as plt
 from scipy.optimize import curve_fit
 from scipy.ndimage import gaussian_filter
 from basicpy import BaSiC
-from basicpy import datasets as bdata
+
+import os
+from typing import Tuple
 
 
 def ff_subtract(i, ffi, ff_bval, ff_scale):
@@ -24,6 +22,113 @@ def ff_subtract(i, ffi, ff_bval, ff_scale):
 def rotate_image(img, rotation_val) -> np.array:
     rotation_params = {"resize": False, "clip": True, "preserve_range": True}
     return transform.rotate(img, rotation_val, **rotation_params).astype("uint16")
+
+
+class RasterParams:
+    def __init__(
+        self,
+        overlap: float,
+        size: int,
+        acqui_ori: Tuple[int, int],
+        rotation: float,
+        dims: tuple,
+        auto_ff: bool = True,
+        ff_type: str = "BaSiC",
+        group_feature=0,
+    ):
+        """
+        Parameters describing a single image raster.
+
+        Arguments:
+            (float) overlap: overlap fraction (e.g., 0.1)
+            (float) rotation: pre-stitch rotation to perform (%)
+            (bool) auto_ff: flag to execute FF correction on stitch, if possible
+            (int | float | string) group_feature: feature value for RasterGroup
+
+        Returns:
+            None
+
+        """
+        # This can never be reached!
+        # if self._root:
+        #     self._parent = list(pathlib.Path(root).parents)[0]
+        self._size = size
+        self._overlap = overlap
+        self._rotation = rotation
+        self._acqui_ori = acqui_ori
+        self._group_feature = group_feature
+        self._auto_ff = auto_ff
+        self._ff_type = ff_type
+
+        self._exposure = None
+        self._channel = None
+        self._parent = None
+        self._dims = dims
+        self._root = None
+
+    def update_root(self, new_root):
+        self._root = new_root
+        self._parent = os.path.dirname(new_root)
+
+    @property
+    def size(self):
+        return self._size
+
+    @property
+    def overlap(self):
+        return self._overlap
+
+    @property
+    def rotation(self):
+        return self._rotation
+
+    @property
+    def acqui_ori(self):
+        return self._acqui_ori
+
+    @property
+    def group_feature(self):
+        return self._group_feature
+
+    @property
+    def auto_ff(self):
+        return self._auto_ff
+
+    @property
+    def ff_type(self):
+        return self._ff_type
+
+    @property
+    def exposure(self):
+        return self._exposure
+
+    @property
+    def channel(self):
+        return self._channel
+
+    @property
+    def parent(self):
+        return self._parent
+
+    @property
+    def dims(self):
+        return self._dims
+
+    @property
+    def root(self):
+        return self._root
+
+    def update_channel(self, new_channel):
+        self._channel = new_channel
+
+    def update_exposure(self, new_exposure):
+        self._exposure = new_exposure
+
+    def update_dims(self, new_dims):
+        self._dims = new_dims
+
+    def update_group_feature(self, new_group_feature):
+        self._group_feature = new_group_feature
 
 
 class Raster(ABC):
@@ -74,7 +179,7 @@ class Raster(ABC):
 
         return [ff_subtract(i, ff_image, ff_bval, ff_scale) for i in self._images]
 
-    def applyFF_BaSiC(self):
+    def applyFF_BaSiC(self, plot: bool):
         """
         Applies flat-field correction to fetched images using BaSiC. This technique simulates a FF and
         dark image based on common shared features across the full raster (e.g. 64 images).
@@ -90,7 +195,7 @@ class Raster(ABC):
             None
 
         """
-        print("Running BaSiC for FF correction...")
+        # print("Running BaSiC for FF correction...")
 
         # Load images
         imgarray = []
@@ -112,18 +217,19 @@ class Raster(ABC):
 
         manual_smoothed = [ff_subtract(i, ffImage, ffbval, ffscale) for i in imgarray]
 
-        fig, axes = plt.subplots(1, 3, figsize=(9, 3))
-        im = axes[0].imshow(basic.flatfield)
-        fig.colorbar(im, ax=axes[0])
-        axes[0].set_title("Flatfield")
-        im = axes[1].imshow(ffImage)
-        fig.colorbar(im, ax=axes[1])
-        axes[1].set_title("Smoothed FF")
-        axes[2].plot(basic.baseline)
-        axes[2].set_xlabel("Frame")
-        axes[2].set_ylabel("Baseline")
-        fig.tight_layout()
-        plt.show()
+        if plot:
+            fig, axes = plt.subplots(1, 3, figsize=(9, 3))
+            im = axes[0].imshow(basic.flatfield)
+            fig.colorbar(im, ax=axes[0])
+            axes[0].set_title("Flatfield")
+            im = axes[1].imshow(ffImage)
+            fig.colorbar(im, ax=axes[1])
+            axes[1].set_title("Smoothed FF")
+            axes[2].plot(basic.baseline)
+            axes[2].set_xlabel("Frame")
+            axes[2].set_ylabel("Baseline")
+            fig.tight_layout()
+            plt.show()
 
         return manual_smoothed
 
@@ -216,7 +322,7 @@ class Raster(ABC):
 
         return manual_smoothed
 
-    def stitch(self, method="cut"):
+    def stitch(self, method="cut", plot: bool = False):
         """
         Wrapper for image stitching method selection.
         TODO: Implement 'overlap' method
@@ -231,7 +337,7 @@ class Raster(ABC):
 
         self.fetch_images()
         if method == "cut":
-            return self.cut_stitch()
+            return self.cut_stitch(plot)
         elif method == "overlap":
             return self.overlap_stitch()
         else:
@@ -239,7 +345,7 @@ class Raster(ABC):
                 'Invalid stitch method. Valid methods are "cut" and "overlap"'
             )
 
-    def cut_stitch(self):
+    def cut_stitch(self, plot: bool):
         """
         Stitches a raster via the 'cut' method. Trims borders according to image overlap and
         concatenates along both axes. If RasterParameters.auto_ff is True, performs
@@ -267,14 +373,14 @@ class Raster(ABC):
 
         tiles = self._images
         if self.params.auto_ff and self.params.ff_type == "BaSiC":
-            tiles = self.ffCorrectedImages = self.applyFF_BaSiC()
-            print("completed BaSiC FF correction")
+            tiles = self.ffCorrectedImages = self.applyFF_BaSiC(plot)
+            # print("completed BaSiC FF correction")
 
-            logging.info(
-                "BaSiC Flat-Field Corrected Image | Ch: {}, Exp: {}".format(
-                    self.params.channel, self.params.exposure
-                )
-            )
+            # logging.info(
+            #     "BaSiC Flat-Field Corrected Image | Ch: {}, Exp: {}".format(
+            #         self.params.channel, self.params.exposure
+            #     )
+            # )
 
         # elif self.params.auto_ff and self.params.ff_type == "BaSiC_masked":
         #     tiles = self.ffCorrectedImages = self.applyFF_BaSiC_masked()
@@ -380,139 +486,3 @@ class FlatRaster(Raster):
                 rotate_image(img, self._params.rotation) for img in self._images
             ]
 
-
-class StackedRaster(Raster):
-    def __init__(self, image_refs, stackIndex, params):
-        """
-
-        Arguments:
-
-        Returns:
-            None
-
-        """
-        super().__init__(image_refs, params)
-        self.stackIndex = stackIndex
-
-    def fetch_images(self):
-        """
-        Fetches (loads into memory) and rotates images (if indicated by raster parameters)
-
-        Arguments:
-            None
-
-        Returns:
-            None
-
-        """
-        r = self._params.rotation
-
-        rotation_params = {"resize": False, "clip": True, "preserve_range": True}
-        rotate_image = lambda i: transform.rotate(i, r, **rotation_params).astype(
-            "uint16"
-        )
-
-        def readImage(path):
-            with Image.open(path) as img:
-                data = np.asarray(ImageSequence.Iterator(img)[self.stackIndex])
-            return data
-
-        images = [readImage(i) for i in self.image_refs]
-
-        if r:
-            images = [rotate_image(i) for i in images]
-
-        self._images = images
-
-
-class RasterSet:
-    def __init__(self, rasters):
-        """
-        A set of rasters
-
-        """
-        self.rasters = rasters
-
-    def exportStitchAll(self, **args):
-        """
-        Basic stitching and export of raster set
-        """
-        while self.rasters:
-            r = self.rasters.pop()
-            r.export_stitch(**args)
-
-
-class RasterGroup:
-    def __init__(self, root, rasters):
-        """ """
-        # Dict of feature (time)
-        self.root = root
-        self.rasters = rasters  # list of rasters
-
-    def add(self):
-        # add raster to group
-        return
-
-    def stitch(self):
-        while self.rasters:
-            self.rasters.pop().stitch()
-
-
-class KineticImaging(RasterGroup):
-    def __init__(self, root, rasters):
-        super().__init__(root, rasters)
-        self.referenced_times = None
-        self.ordered_rasters = None
-
-    def order(self):
-        """
-        Orders the set of rasters as a dictionary of time:raster entries
-
-        Arguments:
-            None
-
-        Returns:
-            None
-
-        """
-        # TODO: why reference the raster params here, instead of sel
-        sorted_times = sorted([raster.params.group_feature for raster in self.rasters])
-        self.referenced_times = [t - min(sorted_times) for t in sorted_times]
-        self.ordered_rasters = {
-            raster.params.group_feature - min(sorted_times): raster
-            for raster in self.rasters
-        }
-
-    def export_stitch(self, method="cut", outPathName="StitchedImages"):
-        """
-        Stitches and exports each of the rasters, appending the raster time onto the filename
-
-        Arguments:
-            (str) method: stitch method ('cut' | 'overlap')
-            (outPathname) out_path_name: Name of folder to house stitched raster. Typically 'StitchedImages'
-
-        Returns:
-            None
-
-        """
-        p = pathlib.Path(self.root)
-        pathstem = p.stem
-        pathparent_stem = pathlib.Path(p.parent).stem
-        for dt, raster in tqdm(
-            self.ordered_rasters.items(),
-            desc="Stitching Kinetics | {}".format(pathparent_stem),
-        ):
-            time = dt.total_seconds()
-            stitchedRaster = raster.stitch(method=method)
-
-            features = [raster.params.exposure, raster.params.channel, int(time)]
-            rasterName = "StitchedImg_{}_{}_{}.tif".format(*features)
-
-            stitchDir = pathlib.Path(os.path.join(self.root, outPathName))
-            stitchDir.mkdir(exist_ok=True)
-            outDir = os.path.join(stitchDir, rasterName)
-            io.imsave(outDir, stitchedRaster, plugin="tifffile", check_contrast=False)
-
-            mp = {"t": time, "ch": raster.params.channel, "ex": raster.params.exposure}
-            logging.debug("Stitch Saved: (Time: {t}, Ch: {ch}, Ex: {ex})".format(**mp))
-        logging.debug("Kinetic Stitches Complete")
