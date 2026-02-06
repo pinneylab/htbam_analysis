@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "htbam-analysis"
-version = "1.2.0-alpha"
+version = "1.2.1-alpha"
 description = ""
 authors = ["Nicholas-Freitas <nicholas.freitas@ucsf.edu>", "duncan-muir <muir.duncan@gmail.com>"]
 readme = "README.md"

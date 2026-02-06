@@ -507,6 +507,88 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
     
     plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_initial_rates, title='Kinetics: Initial Rates')
 
+def plot_product_vs_time_chip(experiment: 'HTBAMExperiment', experiment_name: str, skip_start_timepoint: bool = True,
+                             fit_points_mask: str = None,
+                             plot_xmax: float = None, plot_ymax: float = None,
+                             plot_xmin: float = None, plot_ymin: float = None):
+    '''
+    Plot a full chip with product concentration vs time for each chamber.
+
+    Parameters:
+        experiment ('HTBAMExperiment'): the experiment object.
+        experiment_name (str): the name of the experiment to be plotted.
+        skip_start_timepoint (bool): whether to skip the first timepoint in the analysis. Default is True.
+
+    Returns:
+        None
+    '''
+    experiment_data = experiment.get_run(experiment_name)
+    if fit_points_mask is not None:
+        fit_points_data = experiment.get_run(fit_points_mask)
+
+    # Extract product concentration (Y) from experiment data
+    product_conc_idx = experiment_data.dep_var_type.index('concentration')
+    product_conc_unit = experiment_data.dep_var_units[product_conc_idx]
+    product_conc = experiment_data.dep_var[..., product_conc_idx] * product_conc_unit  # (n_conc, n_timepoints, n_chambers)
+    if fit_points_mask is not None:
+        points_to_plot = fit_points_data.dep_var[:,:,:,0]
+    else:
+        points_to_plot = np.ones(product_conc.shape, dtype=bool)
+
+    substrate_conc = experiment_data.indep_vars.concentration # (n_conc,)
+    time_data = experiment_data.indep_vars.time # (n_conc, n_timepoints)
+
+    if skip_start_timepoint:
+        product_conc = product_conc[:, 1:, :]
+        time_data = time_data[:, 1:]
+        points_to_plot = points_to_plot[:, 1:, :]
+
+    chamber_names = experiment_data.indep_vars.chamber_IDs
+    sample_names = experiment_data.indep_vars.sample_IDs
+
+    sample_names_dict = {cid: sample_names[i] for i, cid in enumerate(chamber_names)}
+
+    # Use mean product (over conc and time) for chip coloring
+    product_dict = {}
+    for i, chamber_id in enumerate(chamber_names):
+        product_dict[chamber_id] = np.nanmax(product_conc[..., i])
+
+    def plot_chamber_product(chamber_id, ax):
+        x_data = time_data  # (n_conc, n_timepoints)
+        y_data = product_conc[:, :, chamber_names == chamber_id]  # (n_conc, n_timepoints, 1)
+
+        # squeeze last dim
+        y_data = np.squeeze(y_data, axis=-1)
+
+        y_data_mask = points_to_plot[:, :, chamber_names == chamber_id][:, :, 0]
+        y_data_mask = y_data_mask > 0
+        x_data_masked = np.where(y_data_mask, x_data, np.nan)
+        y_data_masked = np.where(y_data_mask, y_data, np.nan)
+
+        colors = sns.color_palette('husl', n_colors=y_data.shape[0])
+
+        for i in range(y_data.shape[0]):
+            ax.scatter(x_data[i], y_data[i, :].flatten(), color=colors[i], alpha=0.3)
+            ax.scatter(x_data_masked[i], y_data_masked[i, :].flatten(), color=colors[i], alpha=1)
+
+        # Set axis limits if provided
+        if plot_xmax is not None:
+            ax.set_xlim(right=plot_xmax)
+        if plot_ymax is not None:
+            ax.set_ylim(top=plot_ymax)
+        if plot_xmin is not None:
+            ax.set_xlim(left=plot_xmin)
+        if plot_ymin is not None:
+            ax.set_ylim(bottom=plot_ymin)
+
+        ax.set_xlabel(f'Time ({time_data.units:~})')
+        ax.set_ylabel(f'Product Concentration ({product_conc.units:~})')
+        # legend showing substrate concentrations
+        ax.legend([f'{substrate_conc[i]:~}' for i in range(len(substrate_conc))])
+        return ax
+
+    plot_chip(product_dict, sample_names_dict, graphing_function=plot_chamber_product, title='Kinetics: Product vs Time')
+
 def plot_initial_rates_vs_concentration_chip(experiment: 'HTBAMExperiment',
                                              analysis_name: str,
                                              model_fit_name: str = None,

@@ -301,7 +301,12 @@ class HTBAMExperiment:
         kcat_units = f"{kcat_unit_obj:~}"
 
         # New empty dataframe:
-        df = pd.DataFrame(columns=['sample', f'avg_k_cat ({kcat_units})', f'avg_K_M ({kM_units})', f'avg_E_conc ({E_units})', 'avg_fit_R2', 'replicates', 'chamber_IDs'])
+        df = pd.DataFrame(columns=['sample', 
+                                   f'avg_k_cat ({kcat_units})', f'std_k_cat ({kcat_units})',
+                                   f'avg_K_M ({kM_units})', f'std_K_M ({kM_units})',
+                                   f'avg_E_conc ({E_units})', f'std_E_conc ({E_units})',
+                                   'avg_fit_R2', 'std_fit_R2',
+                                   'replicates', 'chamber_IDs'])
 
         # Iterate over samples
         for sample in unique_samples:
@@ -328,22 +333,34 @@ class HTBAMExperiment:
             # Get average rate
             if replicate_number > 0:
                 avg_kcat = np.nanmean(sample_kcat)
+                std_kcat = np.nanstd(sample_kcat)
                 avg_kM = np.nanmean(sample_kM)
+                std_kM = np.nanstd(sample_kM)
                 avg_E_conc = np.nanmean(sample_E_conc)
+                std_E_conc = np.nanstd(sample_E_conc)
                 avg_r2 = np.nanmean(sample_r2)
+                std_r2 = np.nanstd(sample_r2)
             else:
                 avg_kcat = np.nan
+                std_kcat = np.nan
                 avg_kM = np.nan
+                std_kM = np.nan
                 avg_E_conc = np.nan
+                std_E_conc = np.nan
                 avg_r2 = np.nan
+                std_r2 = np.nan
 
             # Append to dataframe
             df = pd.concat([df, pd.DataFrame([{
                 'sample': sample,
                 f'avg_k_cat ({kcat_units})': avg_kcat,
+                f'std_k_cat ({kcat_units})': std_kcat,
                 f'avg_K_M ({kM_units})': avg_kM,
+                f'std_K_M ({kM_units})': std_kM,
                 f'avg_E_conc ({E_units})': avg_E_conc,
+                f'std_E_conc ({E_units})': std_E_conc,
                 'avg_fit_R2': avg_r2,
+                'std_fit_R2': std_r2,
                 'replicates': replicate_number,
                 'chamber_IDs': nonnan_sample_chamber_IDs,
             }])], ignore_index=True)
@@ -422,87 +439,6 @@ class HTBAMExperiment:
         df.to_csv(f'{output_dir}/{file_name}', index=False)
 
         print(f"Chamber kcat data exported to {output_dir}/{file_name}")
-
-
-    ### These are the old output functions - I will remove them in a future update
-    # def export_run_data_raw(self, run_name: str, output_dir: str = None):
-    #     '''
-    #     Export per-chamber data to a CSV file, for Data2D objects.
-    #     Input:
-    #         run_name (str): the name of the run to be exported.
-    #         output_dir (str): the directory to save the CSV file. If None, uses current directory.
-    #     Output:
-    #         None
-    #     '''
-    #     run_data = self.get_run(run_name)
-
-    #     assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
-
-    #     if output_dir is None:
-    #         output_dir = os.getcwd()
-        
-    #     # Create output directory if it doesn't exist
-    #     Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-    #     # Define the output file path
-    #     output_file = Path(output_dir) / f"{run_name}_data.csv"
-
-    #     chamber_IDs = run_data.indep_vars.chamber_IDs
-    #     sample_IDs = run_data.indep_vars.sample_IDs
-        
-    #     # Save the data to a CSV file
-    #     with open(output_file, 'w', newline='') as csvfile:
-    #         writer = csv.writer(csvfile)
-    #         header = ['chamber_ID', 'sample_ID'] + run_data.dep_var_type
-    #         writer.writerow(header)
-    #         for i in range(run_data.dep_var.shape[0]):
-    #             row = [chamber_IDs[i], sample_IDs[i]] + run_data.dep_var[i].tolist()
-    #             writer.writerow(row)
-        
-    #     print(f"Run data exported to {output_file}")
-
-    # def export_run_data_processed(self, run_name: str, output_dir: str = None):
-    #     '''
-    #     Export per-sample data to a CSV file, for Data2D objects.
-    #     Input:
-    #         run_name (str): the name of the run to be exported.
-    #         output_dir (str): the directory to save the CSV file. If None, uses current directory.
-    #     Output:
-    #         None
-    #     '''
-    #     run_data = self.get_run(run_name)
-    #     assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
-        
-    #     sample_IDs = run_data.indep_vars.sample_IDs
-    #     chamber_IDs = run_data.indep_vars.chamber_IDs
-
-    #     # get the mean, std, and count for each value across each sample
-    #     sample_list = np.unique(sample_IDs)
-    #     sample_data = {sample: [] for sample in sample_list}
-    #     for i, sample in enumerate(sample_list):
-    #         sample_mask = (sample_IDs == sample)
-    #         sample_data[sample] = {
-    #             'chamber_IDs': chamber_IDs[sample_mask],
-    #             'mean': np.nanmean(run_data.dep_var[sample_mask], axis=0),
-    #             'std': np.nanstd(run_data.dep_var[sample_mask], axis=0),
-    #             'count': np.sum(~np.isnan(run_data.dep_var[sample_mask]), axis=0)
-    #         }
-
-    #     if output_dir is None:
-    #         output_dir = os.getcwd()
-    #     # Create output directory if it doesn't exist
-    #     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    #     # Define the output file path
-    #     output_file = Path(output_dir) / f"{run_name}_processed_data.csv"
-    #     # Save the data to a CSV file
-    #     with open(output_file, 'w', newline='') as csvfile:
-    #         writer = csv.writer(csvfile)
-    #         header = ['sample_ID', 'chamber_IDs'] + run_data.dep_var_type
-    #         writer.writerow(header)
-    #         for sample, data in sample_data.items():
-    #             row = [sample, ','.join(data['chamber_IDs'].tolist())] + data['mean'].tolist()
-    #             writer.writerow(row)
-    #     print(f"Processed run data exported to {output_file}")
 
     def export_mm_subplots_by_chamber(self,
                            analysis_name: str,
