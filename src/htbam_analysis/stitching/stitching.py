@@ -3,6 +3,7 @@ Parallel stitching utilities for processing multiple raster groups.
 """
 import os
 import tqdm
+import pandas as pd
 from pathlib import Path
 import numpy as np
 from skimage import io
@@ -128,6 +129,7 @@ def stitch_images(
 
     # make an output directory for stitched images
     outdir = root / 'stitched_images'
+    outdir.mkdir(exist_ok=True)
 
     # prepare arguments
     tasks = [(dir, raster, outdir, raster_settings) 

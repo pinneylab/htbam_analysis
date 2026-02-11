@@ -1218,7 +1218,7 @@ class ButtonBindingSeries:
         self.bait_channel = bait_channel
         self.bait_exposure = bait_exposure
     
-    def grab_binding_images(self, binding_path: str, verbose: bool=True, concentration_regex: str = r'd\d+_(\d+(?:_\d+)?)(?=[munp]?M)'):
+    def grab_binding_images(self, binding_path: str, verbose: bool=True, concentration_regex: str = r'd\d+_(\d+(?:_\d+)?)(?=[munp]?M)', use_bgsub_images: bool = True):
         """Grabs images from a directory structure for PreWash and PostWash conditions.
 
         Args:
@@ -1226,6 +1226,7 @@ class ButtonBindingSeries:
             verbose (bool, optional): Whether to print paths to found images. Defaults to True.
             concentration_regex (str, optional): Regular expression to extract concentration values
                 from file paths. If None, a default parser will be used.
+            use_bgsub_images (bool, optional): Designates whether or not background subtracted images should be used.
 
         Returns:
             None
@@ -1234,11 +1235,19 @@ class ButtonBindingSeries:
         # utility function that globs images generated with a specified exposure, channel, etc
         def get_images(parent_path: str, exposure: int, channel: int, postwash: bool = True):
             wash_timing = 'PostWash' if postwash else 'PreWash'
-            handle = '*{wash_timing}_Quant/{channel}/StitchedImages/BGSubtracted_StitchedImg_{exp}_{channel}_0.tif'.format(
-                wash_timing=wash_timing,
-                channel=channel, 
-                exp=exposure
-                )
+
+            if use_bgsub_images:
+                handle = '*{wash_timing}_Quant/{channel}/StitchedImages/BGSubtracted_StitchedImg_{exp}_{channel}_0.tif'.format(
+                    wash_timing=wash_timing,
+                    channel=channel, 
+                    exp=exposure
+                    )
+            else: 
+                handle = '*{wash_timing}_Quant/{channel}/StitchedImages/StitchedImg_{exp}_{channel}_0.tif'.format(
+                    wash_timing=wash_timing,
+                    channel=channel, 
+                    exp=exposure
+                    )
             return glob(os.path.join(parent_path, handle))
         
         # utility function for extracting concentrations from file paths

@@ -18,6 +18,13 @@ from collections import namedtuple
 # Scientific Data Structures and Plotting
 import pandas as pd
 
+def read_pinlist(pinlistPath):
+    pl = pd.read_csv(pinlistPath)
+    pl["Indices"] = pl.Indices.apply(eval)
+    pl["x"] = pl.Indices.apply(lambda x: x[0])
+    pl["y"] = pl.Indices.apply(lambda x: x[1])
+    sorted_pinlist = pl.set_index(["x", "y"], drop=True, inplace=False).sort_index()
+    return sorted_pinlist
 
 class Experiment:
     def __init__(self, description, root, operator, repoName="Repo"):
@@ -119,7 +126,7 @@ class Experiment:
 
 class Device:
     def __init__(
-        self, setup, dname, dims, pinlist, corners, operators="FordyceLab", attrs=None
+        self, setup, dname, dims, pinlist, operators="FordyceLab", attrs=None
     ):
         """
         Constructor for the Device class.
@@ -146,7 +153,7 @@ class Device:
         self.operators = operators
         self.attrs = attrs  # arbitrary metadata, as a dict
         self.experiments = None
-        self.corners = Device._corners(corners)
+        # self.corners = Device._corners(corners)
 
     @staticmethod
     def _corners(corners):
