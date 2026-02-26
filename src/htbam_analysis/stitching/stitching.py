@@ -6,6 +6,7 @@ import tqdm
 import pandas as pd
 from pathlib import Path
 import numpy as np
+from shutil import copy
 from skimage import io
 from multiprocessing import Pool
 from typing import Union, List, Tuple
@@ -49,7 +50,11 @@ from htbam_analysis.stitching import rastering
 #         return False, None, f'Error processing {dir}: {str(e)}'
 
 
-def process_single_raster(args: Tuple) -> Tuple[bool, Path, str]:
+def stitch_single_raster(
+    raster: List[Path],
+    raster_params: rastering.RasterParams,
+    stitched_image_path: Path,
+) -> Tuple[bool, Path, str]:
     """
     Process a single raster group (directory + list of image paths).
     
@@ -59,10 +64,8 @@ def process_single_raster(args: Tuple) -> Tuple[bool, Path, str]:
     Returns:
         Tuple of (success: bool, output_file: Path, error_msg: str)
     """
-    dir, raster, outdir, raster_params = args
+
     n_raster = int(raster_params.dims[0] * raster_params.dims[1])
-    
-    assert os.path.isdir(dir)
     assert len(raster) == n_raster
     
     # Create the raster and stitch
@@ -73,11 +76,10 @@ def process_single_raster(args: Tuple) -> Tuple[bool, Path, str]:
     stitched_image = raster_obj.stitch()
     
     # Save the stitched image
-    outfile = (outdir / dir.relative_to(outdir.parent)).with_suffix('.tif')
-    outfile.parent.mkdir(parents=True, exist_ok=True)
-    io.imsave(outfile, stitched_image, plugin="tifffile", check_contrast=False)
+    stitched_image_path.parent.mkdir(parents=True, exist_ok=True)
+    io.imsave(stitched_image_path, stitched_image, plugin="tifffile", check_contrast=False)
         
-    return True, outfile, None
+    return True, stitched_image_path, None
 
 
 def stitch_images(
@@ -85,22 +87,26 @@ def stitch_images(
     rotation: float,
     acqui_ori: Tuple[bool, bool] = (True, False),
 ) -> None:
-
+        
     if not isinstance(root, Path):
-        root = Path(root)
+            root = Path(root)
 
     assert root.exists(), f"Root directory {root} does not exist"
+
+    raw_images = root / 'raw_images'
+    assert raw_images.exists(), f"Raw images directory {raw_images} does not exist"
 
     # load image df
     image_csv = os.path.join(root, 'imaging.csv')
     image_df = pd.read_csv(image_csv)
+
+    # make absolute image paths
     image_df['image_path'] = image_df['image_path'].apply(Path)
+    image_df['image_path'] = image_df['image_path'].apply(lambda p: raw_images / p)
+    image_df['image_path_parent'] = image_df['image_path'].apply(lambda p: p.parent)
 
-    # write column for parent directories
-    image_df['image_path_parent'] = [p.parent for p in image_df['image_path']]
-
-    # sort image df by parent dir and raster index
-    image_df.sort_values(by=['image_path_parent', 'raster_index'], inplace=True)
+    # sort image df by parent dir and raster position
+    image_df.sort_values(by=['image_path_parent', 'raster_col_index', 'raster_row_index'], inplace=True)
 
     # get a list of rasters
     _grouped = image_df.groupby('image_path_parent')
@@ -108,7 +114,7 @@ def stitch_images(
     rasters = _grouped['image_path'].apply(list).tolist()
 
     # make a df for stitched images
-    stitched_image_df = _grouped.first()
+    stitched_image_df = _grouped.first().reset_index()
 
     # make raster settings
     raster_settings_list = [rastering.RasterParams(
@@ -125,40 +131,30 @@ def stitch_images(
 
     # drop uneeded columns
     stitched_image_df.reset_index(drop=True)
-    stitched_image_df.drop(columns=['raster_index', 'frame_time', 'raster_width', 'raster_height', 'raster_start_time', 'x', 'y', 'z', 'raster_overlap'], inplace=True)
+    stitched_image_df.drop(columns=['raster_index', 'frame_time', 'raster_width', 'raster_height', 'raster_start_time', 'x', 'y', 'z', 'raster_overlap', 'raster_row_index', 'raster_col_index'], inplace=True)
 
     # make an output directory for stitched images
-    outdir = root / 'stitched_images'
-    outdir.mkdir(exist_ok=True)
+    stitched_images = root / 'stitched_images'
+    stitched_images.mkdir(exist_ok=True)
 
-    # prepare arguments
-    tasks = [(dir, raster, outdir, raster_settings) 
-            for dir, raster, raster_settings in zip(image_dirs, rasters, raster_settings_list)]
-    
     # stitch images
-    results = []
-    for task in tqdm.tqdm(tasks, desc='Stitching image rasters'):
-        result = process_single_raster(task)
-        results.append(result)
+    success_mask = np.ones(len(image_dirs), dtype=bool)
+    for i in tqdm.tqdm(range(len(image_dirs)), desc='Stitching image rasters'):
+        outpath = stitched_images / image_dirs[i].relative_to(raw_images).with_suffix('.tif')
+        try:
+            stitch_single_raster(rasters[i], raster_settings_list[i], outpath)
+        except Exception as e:
+            print(f"Error stitching {outpath}: {e}")
+            success_mask[i] = False
 
-    # unpack results
-    success_mask, outfiles, msgs = map(list, zip(*results))
-    success_mask, outfiles = np.array(success_mask), np.array(outfiles)
+    # print report
+    print("{successes} / {total} rasters were successfully stitched".format(successes=(success_mask).sum(), total=len(success_mask)))
 
-    # print summary results
-    successful = success_mask.sum()
-    failed = len(results) - successful
-    
-    print(f'\nCompleted: {successful}/{len(tasks)} rasters stitched successfully')
-    if failed > 0:
-        print(f'Failed: {failed} rasters\n')
-        for success, msg in success_mask, msgs:
-            if not success:
-                print(f'  ✗ {msg}')
-
-    stitched_image_df = stitched_image_df.loc[success_mask].copy()
-    stitched_image_df['image_path'] = outfiles[success_mask]
-    stitched_image_df.to_csv(outdir / 'stitched_images.csv', index=False)
+    # carry over image metadata
+    success_df = stitched_image_df.loc[success_mask].copy()
+    success_df['image_path'] = success_df['image_path_parent'].apply(lambda f: f.relative_to(raw_images).with_suffix('.tif'))
+    success_df.drop(columns=['image_path_parent'], inplace=True)
+    success_df.to_csv(stitched_images / 'stitched_images.csv', index=False)
 
 
 def backgroud_subtract(background_image, target_image):
