@@ -86,6 +86,7 @@ def stitch_images(
     root: Union[Path, str],
     rotation: float,
     acqui_ori: Tuple[bool, bool] = (True, False),
+    verbose: bool = True
 ) -> None:
         
     if not isinstance(root, Path):
@@ -144,17 +145,24 @@ def stitch_images(
         try:
             stitch_single_raster(rasters[i], raster_settings_list[i], outpath)
         except Exception as e:
-            print(f"Error stitching {outpath}: {e}")
             success_mask[i] = False
+            if verbose:
+                print(f"Error stitching {image_dirs[i]}: {e}")
+
 
     # print report
     print("{successes} / {total} rasters were successfully stitched".format(successes=(success_mask).sum(), total=len(success_mask)))
 
-    # carry over image metadata
+    # format and save stitched image dataframe
     success_df = stitched_image_df.loc[success_mask].copy()
     success_df['image_path'] = success_df['image_path_parent'].apply(lambda f: f.relative_to(raw_images).with_suffix('.tif'))
     success_df.drop(columns=['image_path_parent'], inplace=True)
     success_df.to_csv(stitched_images / 'stitched_images.csv', index=False)
+
+    # carry over metadata
+    for src in raw_images.rglob('*index.csv'):
+        dst = stitched_images / src.relative_to(raw_images)
+        copy(src, dst)
 
 
 def backgroud_subtract(background_image, target_image):
@@ -170,25 +178,45 @@ def backgroud_subtract(background_image, target_image):
 def background_subtract_images(
     root: Union[Path, str],
     background_images: List[Union[Path, str]],
-    settings_to_match: List[str] = ['temp', 'hum','setup', 'dname', 'lightsource', 'channel', 'exposure', 'camera_mode', 'binning', 'nosepiece']
+    settings_to_match: List[str] = ['temp', 'hum','setup', 'dname', 'lightsource', 'channel', 'exposure', 'camera_mode', 'binning', 'nosepiece'],
+    verbose: bool = True
 ):
+    
+    #region IO and sanity checks
 
+    # check that root is a Path object and exists
     if not isinstance(root, Path):
         root = Path(root)
     assert root.exists(), f"Root directory {root} does not exist"
 
-    stitched_root = root / 'stitched_images'
-    assert stitched_root.exists(), f"Stitched images directory {stitched_root} does not exist"
+    # check that background images are Path objects and exist
+    for i in range(len(background_images)):
+        if not isinstance(background_images[i], Path):
+            background_images[i] = Path(background_images[i])
+        assert background_images[i].exists(), f"Background image {background_images[i]} does not exist"
 
-    stitched_images_csv = stitched_root / 'stitched_images.csv'
+    # check that stitched images directory and csv exist
+    stitched_images = root / 'stitched_images'
+    assert stitched_images.exists(), f"Stitched images directory {stitched_images} does not exist"
+
+    stitched_images_csv = stitched_images / 'stitched_images.csv'
     assert stitched_images_csv.exists(), f"Stitched images csv {stitched_images_csv} does not exist"
 
+    # load stitched images dataframe
     stitched_image_df = pd.read_csv(stitched_images_csv)
     stitched_image_df['image_path'] = stitched_image_df['image_path'].apply(Path)
+    stitched_image_df['image_path'] = stitched_image_df['image_path'].apply(lambda f: stitched_images / f)
+
+    #endregion
+
+    # group rows by imaging settings
     grouped = stitched_image_df.groupby(by=settings_to_match, dropna=False)
 
-    outdir = root / 'bgsub_images'
+    bgsub_images = root / 'bgsub_images'
+    bgsub_df = []
     for key, group in grouped:
+
+        # region background image sanity checks
 
         print('Attempting background subtracting on images with the following settings:')
         print(' | '.join(['{}: {}'.format(setting, value) for setting, value in zip(settings_to_match, key)]))
@@ -204,24 +232,51 @@ def background_subtract_images(
             print('Too many background images found. Continuing.\n')    
             continue
 
-        # df for target images
-        target_df = group.loc[~background_mask].copy()
+        # endregion
 
         # df for background image (should just be one row)
         background_df = group.loc[background_mask].copy()
         background_image_path = group[background_mask].iloc[0]['image_path']
         background_image = io.imread(background_image_path)
 
-        for target_image_path in tqdm.tqdm(target_df['image_path'], desc='Running background subtraction.'):
-            
-            target_image = io.imread(target_image_path)
-            subtracted_image = backgroud_subtract(background_image, target_image)
-            
-            # Save the stitched image
-            outfile = outdir / target_image_path.relative_to(stitched_root)
-            outfile.parent.mkdir(parents=True, exist_ok=True)
-            io.imsave(outfile, subtracted_image, plugin="tifffile", check_contrast=False)
+        # df for target images
+        target_df = group.loc[~background_mask].copy()
+        target_df['background_image'] = [background_image_path] * len(target_df)
+        target_images = target_df['image_path'].tolist()
+
+        success_mask = np.ones(len(target_df), dtype=bool)
+        for i in tqdm.tqdm(range(len(target_images)), desc='Running background subtraction.'):
+            target_image_path = target_images[i]
+            try: 
+                target_image = io.imread(target_image_path)
+                subtracted_image = backgroud_subtract(background_image, target_image)
+                
+                # save the stitched image
+                outfile = bgsub_images / target_image_path.relative_to(stitched_images)
+                outfile.parent.mkdir(parents=True, exist_ok=True)
+                io.imsave(outfile, subtracted_image, plugin="tifffile", check_contrast=False)
+
+            except Exception as e:
+                success_mask[i] = False
+
+                if verbose:
+                    print(f"Error background subtracting {target_image_path}: {e}")
+        
+        print("{successes} / {total} images were successfully background subtracted".format(successes=(success_mask).sum(), total=len(success_mask)))
         print()
+
+        bgsub_df.append(target_df[success_mask])
+
+    # format and save the background subtraction dataframe
+    bgsub_df = pd.concat(bgsub_df, ignore_index=True)
+    bgsub_df['image_path'] = bgsub_df['image_path'].apply(lambda f: f.relative_to(stitched_images))
+    bgsub_df['background_image'] = bgsub_df['background_image'].apply(lambda f: f.relative_to(stitched_images))
+    bgsub_df.to_csv(bgsub_images / 'bgsub_images.csv', index=False)
+
+    # carry over metadata
+    for src in stitched_images.rglob('*index.csv'):
+        dst = bgsub_images / src.relative_to(stitched_images)
+        copy(src, dst)
 
 
 ### JSZ WIP CODE ###
