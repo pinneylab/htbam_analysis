@@ -226,19 +226,17 @@ def background_subtract_images(
 
         if sum(background_mask) == 0:
             print('No background image found. Continuing.\n')
-            continue
 
-        elif sum(background_mask) > 1:
-            print('Too many background images found. Continuing.\n')    
-            continue
+        else:
+            # df for background image (should just be one row)
+            background_df = group.loc[background_mask].copy()
+            background_image_path = background_df[background_mask].iloc[0]['image_path']
+            background_image = io.imread(background_image_path)
+            print('Using {} as background image'.format(background_image_path))
 
         # endregion
 
-        # df for background image (should just be one row)
-        background_df = group.loc[background_mask].copy()
-        background_image_path = group[background_mask].iloc[0]['image_path']
-        background_image = io.imread(background_image_path)
-
+        
         # df for target images
         target_df = group.loc[~background_mask].copy()
         target_df['background_image'] = [background_image_path] * len(target_df)
