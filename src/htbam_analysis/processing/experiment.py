@@ -9,179 +9,209 @@
 # python_version    : 3.7
 
 
-# General Python
-import os
+import json
+import pandas as pd
 from pathlib import Path
-import logging
+from typing import Union, Tuple
 from collections import namedtuple
 
-# Scientific Data Structures and Plotting
-import pandas as pd
 
-def read_pinlist(pinlistPath):
-    pl = pd.read_csv(pinlistPath)
+def read_pinlist(pl):
     pl["Indices"] = pl.Indices.apply(eval)
     pl["x"] = pl.Indices.apply(lambda x: x[0])
     pl["y"] = pl.Indices.apply(lambda x: x[1])
     sorted_pinlist = pl.set_index(["x", "y"], drop=True, inplace=False).sort_index()
     return sorted_pinlist
 
-class Experiment:
-    def __init__(self, description, root, operator, repoName="Repo"):
-        """
-        Constructor for the Experiment class.
 
-        Arguments:
-            (str) description: User-defined xperimental description
-            (str) root: Root path of the experimental data
-            (str) operator: Workup user name or initials
-            (str) repoName: Name of the stamp repo
+def make_dummy_pinlist(block_descriptions: dict):
 
-        Returns:
-            None
+    def get_block(c):
+        return ((c // 8) + 1)
 
-        """
-        self.info = description
-        self.root = root
-        self.devices = []
-        self.operator = operator
-        self.repoName = repoName
-        self.repoRoot = Path(os.path.join(root, repoName))
-        self._initializeLogger()
-        logging.info("Experiment Initialized | {}".format(self.__str__()))
+    pinlist_dict = []
+    for c in range(32):
+        for r in range(56):
+            block = get_block(c)
+            mutant = block_descriptions[block]
+            pinlist_dict.append({'Indices': (c + 1, r + 1), 'MutantID': mutant})
+    pinlist = pd.DataFrame(pinlist_dict)
+    pinlist['Indices'] = pinlist['Indices'].astype(str)
 
-    def _initializeLogger(self):
-        """
-        Initializes the logger, which logs to both a file (>DEBUG) and the console (>INFO)
+    pinlist = read_pinlist(pinlist)
 
-        Arguments:
-            None
-
-        Return:
-            None
-
-        """
-
-        logFile = os.path.join(self.root, "Workup.log")
-        # verbose logging to file
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)-4s %(name)-4s %(levelname)-4s %(message)s",
-            datefmt="%Y/%m/%d %H:%M:%S",
-            filename=logFile,
-            filemode="a+",
-        )
-        console = logging.StreamHandler()
-        console.setLevel(logging.INFO)
-        # simpler console logging
-        formatter = logging.Formatter(
-            "%(levelname)-8s %(message)s", datefmt="%Y/%m/%d %H:%M:%S"
-        )
-        console.setFormatter(formatter)
-        logging.getLogger("").addHandler(console)
-
-        # chiplogger = logging.getLogger('experiment.chip') # FUTURE
-
-    def addDevices(self, devices):
-        """
-
-        Arguments:
-            (list | tuple) devices: list or tuple of Device objects to add to the experiment
-
-        Returns:
-            None
-
-        """
-
-        def add(d):
-            if isinstance(d, Device):
-                self.devices.append(d)
-            else:
-                raise ValueError("Must add an experimental Device object")
-
-        if isinstance(devices, tuple) or isinstance(devices, list):
-            for d in devices:
-                if any([d == device for device in self.devices]):
-                    logging.warn(
-                        "Device already added |  Device: {}".format(d.__str__())
-                    )
-                else:
-                    add(d)
-                    logging.info("Added Device | Device: {}".format(d.__str__()))
-        else:
-            raise ValueError("Must add devices as a list or tuple")
-
-    @staticmethod
-    def read_pinlist(pinlistPath):
-        pl = pd.read_csv(pinlistPath)
-        pl["Indices"] = pl.Indices.apply(eval)
-        pl["x"] = pl.Indices.apply(lambda x: x[0])
-        pl["y"] = pl.Indices.apply(lambda x: x[1])
-        sorted_pinlist = pl.set_index(["x", "y"], drop=True, inplace=False).sort_index()
-        return sorted_pinlist
-
-    def __str__(self):
-        return "Description: {}, Operator: {}".format(self.info, self.operator)
+    return pinlist
 
 
 class Device:
-    def __init__(
-        self, setup, dname, dims, pinlist, operators="FordyceLab", attrs=None
-    ):
-        """
-        Constructor for the Device class.
 
-        Arguments:
-            (str) setup:
-            (str) dname:
-            (tuple) dims:
-            (pd.DataFrame) pinlist: Pinlist indexed by (x, y) chamber inddices, and ID column "MutantID"
-            (tuple) corners: nested tuple of chip corner positions of the form
-                ((ULx, ULy),(URx, URy),(LLx, LLy),(LRx, LRy))
-            (str) operators: Name(s) of device operators
-            (attrs) dict: arbitrary device metdata
-
-        Returns:
-            None
-
-        """
-
+    def __init__(self, setup: str, dname: str, dims: Tuple[int, int] = (32, 56)):
         self.setup = setup
         self.dname = dname
         self.dims = namedtuple("ChipDims", ["x", "y"])(*dims)
-        self.pinlist = pinlist
-        self.operators = operators
-        self.attrs = attrs  # arbitrary metadata, as a dict
-        self.experiments = None
-        # self.corners = Device._corners(corners)
-
-    @staticmethod
-    def _corners(corners):
-        """
-        Generates a corners namedtuple from a set of cornerpositions.
-
-        Arguments:
-            (tuple) corners: corner positions of the form ((ULx, ULy),(URx, URy),(LLx, LLy),(LRx, LRy))
-
-        Returns:
-            (namedtuple) a namedtuple for the cornerpositions
-
-        """
-        chipCorners = namedtuple("Corners", ["ul", "ur", "bl", "br"])
-        return chipCorners(*corners)
+        self.pinlist = None
 
     def __str__(self):
-        return "{}, {}, {}".format(self.operators, self.setup, self.dname)
+        return "{}, {}, {}".format(self.setup, self.dname, self.dims)
 
-    def __eq__(self, other):
-        if isinstance(other, Device):
-            return (
-                (self.setup == other.setup)
-                and (self.dname == other.dname)
-                and (self._corners == other._corners)
-            )
-        else:
-            return NotImplemented
+    def set_pinlist(self, pinlist_path: Union[str, Path] = None, block_descriptions: dict = None):
 
-    def _repr_pretty_(self, p, cycle=True):
-        p.text("<{}>".format(self.__str__()))
+        if pinlist_path:
+            pinlist = read_pinlist(pd.read_csv(pinlist_path))
+
+        if block_descriptions:
+            pinlist = make_dummy_pinlist(block_descriptions)
+
+        self.pinlist = pinlist
+
+        return
+
+
+class Experiment:
+
+    def __init__(self, root: Union[str, Path]):
+
+        root = Path(root) if not isinstance(root, Path) else root
+        self.root = root
+        self.devices = {}
+
+        self.image_df = self._load_imaging_data()
+        self.stitched_image_df = None
+        
+
+    def _load_imaging_data(self):
+        
+        path = self.root / 'imaging.csv'
+        assert path.exists()
+
+        image_df = pd.read_csv(path)
+        image_df.sort_values(by=['image_path_parent', 'raster_col_index', 'raster_row_index'], inplace=True)
+
+        return image_df
+    
+
+    def add_device(self, device: Device):
+        self.devices[device.dname] = device
+
+
+def series_to_dataframe(series_dict):
+    """
+    Recursively flattens a nested series dictionary into a Pandas DataFrame.
+    """
+    rows = []
+
+    def walk(item):
+        if item.get("item_type") == "image":
+            # Create a flat dictionary: {'id': 'img_01', 'metadat_col1': val, ...}
+            row = {"identifier": item["identifier"]}
+            row.update(item.get("metadata", {}))
+            rows.append(row)
+        
+        elif item.get("item_type") == "series":
+            # If it's a series, recurse into its items
+            for sub_item in item.get("items", []):
+                walk(sub_item)
+
+    # Start the recursion
+    walk(series_dict)
+    
+    return pd.DataFrame(rows)
+
+
+# def df_to_nested_series(df, group_cols, series_id="root"):
+#     """
+#     Converts a flat DataFrame into a nested dictionary structure.
+    
+#     Args:
+#         df: The pandas DataFrame.
+#         group_cols: A list of column names to group by (e.g., ['replicate', 'channel']).
+#         series_id: The ID for the current series level.
+#     """
+#     # Base Case: No more groups to create, these are individual images
+#     if not group_cols:
+#         items = []
+#         for _, row in df.iterrows():
+#             # Separate the 'id' from the rest of the metadata
+#             img_id = str(row['id'])
+#             # Convert row to dict and remove 'id' so it only contains metadata
+#             metadata = row.drop('id').to_dict()
+            
+#             items.append({
+#                 "id": img_id,
+#                 "type": "image",
+#                 "metadata": metadata
+#             })
+#         return items
+
+#     # Recursive Case: Group by the first column in the list
+#     current_group_col = group_cols[0]
+#     remaining_cols = group_cols[1:]
+    
+#     nested_items = []
+#     for group_val, group_df in df.groupby(current_group_col):
+#         # The ID for the sub-series is the value of the grouping column
+#         sub_series_id = str(group_val)
+        
+#         nested_items.append({
+#             "id": sub_series_id,
+#             "type": "series",
+#             "items": df_to_nested_series(group_df, remaining_cols, sub_series_id)
+#         })
+        
+#     # If this is the top-level call, wrap it in a root series dict
+#     if series_id == "root":
+#         return {"id": "root", "type": "series", "items": nested_items}
+    
+#     return nested_items
+
+
+class DataHandler:
+    
+    def __init__(
+            self, 
+            root: Union[str, Path]):
+
+        self._root = Path(root) if isinstance(root, str) else root
+        assert self._root.exists()
+        self._bsgub_images = root / 'bgsub_images'
+        assert self._root.exists()
+
+        self.image_metadata = self.load_image_metadata(self._bsgub_images / 'bgsub_images.csv')
+        self.series_index_metadata = self.load_series_metadata(self._root / 'series_index.json')
+
+        print("Loaded the following image sets:")
+        for key in self.series_index_metadata:
+            print(key)
+
+    def load_image_metadata(self, image_metadata_path: Union[str, Path]):
+        image_metadata =  pd.read_csv(image_metadata_path)
+        image_metadata['image_path'] = image_metadata['image_path'].apply(lambda f: self._bsgub_images / Path(f))
+        return image_metadata
+
+    def load_series_metadata(self, series_metadata_path: Union[str, Path]):
+
+        with open(series_metadata_path, 'r') as f:
+            series_index = json.load(f)
+
+        series_metadata = {}
+        for series in series_index:
+            identifier = series['identifier']
+            df = series_to_dataframe(series)
+            df['identifier'] = df['identifier'].apply(lambda f: self._bsgub_images / Path(f).with_suffix('.tif'))
+            series_metadata[identifier] = df
+            
+        return series_metadata
+
+    def get_images(self, identifier: str):
+
+        series_df = self.series_index_metadata[identifier].copy()
+        series_df.sort_values(by='identifier', inplace=True)
+        series_mask = self.image_metadata['image_path'].isin(series_df['identifier'])
+        
+        image_df = self.image_metadata[series_mask].copy()
+        
+        image_df.sort_values(by='image_path', inplace=True)
+
+        merged = pd.merge(series_df, image_df, left_on='identifier', right_on='image_path')
+
+        return merged
