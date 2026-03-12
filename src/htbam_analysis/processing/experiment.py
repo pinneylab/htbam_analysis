@@ -172,20 +172,28 @@ class DataHandler:
             root: Union[str, Path]):
 
         self._root = Path(root) if isinstance(root, str) else root
-        assert self._root.exists()
+        assert self._root.exists(), 'root path: {} does not exist'.format(self._root)
         self._bsgub_images = root / 'bgsub_images'
-        assert self._root.exists()
+        assert self._bsgub_images.exists(), 'bgsub_images: {} does not exist.'.format(self._bgsub_images)
 
         self.image_metadata = self.load_image_metadata(self._bsgub_images / 'bgsub_images.csv')
         self.series_index_metadata = self.load_series_metadata(self._root / 'series_index.json')
 
         print("Loaded the following image sets:")
+        series_mask = np.zeros(len(self.image_metadata), dtype=bool)
         for key in self.series_index_metadata:
             print(key)
+            mask = self.image_metadata['image_path'].apply(str).str.contains(key)
+            series_mask = series_mask + mask
+
+        print("\nLoaded the following images:")
+        for image in self.image_metadata[~series_mask]['image_identifier']:
+            print(image)
 
     def load_image_metadata(self, image_metadata_path: Union[str, Path]):
         image_metadata =  pd.read_csv(image_metadata_path)
         image_metadata['image_path'] = image_metadata['image_path'].apply(lambda f: self._bsgub_images / Path(f))
+        image_metadata['image_identifier'] = image_metadata['image_path'].apply(lambda f: f.with_suffix('').name)
         return image_metadata
 
     def load_series_metadata(self, series_metadata_path: Union[str, Path]):
@@ -202,9 +210,29 @@ class DataHandler:
             
         return series_metadata
 
-    def get_images(self, identifier: str):
+    def get_images(self, identifiers: Union[List[str], str]):
 
-        series_df = self.series_index_metadata[identifier].copy()
+        if not isinstance(identifiers, list):
+            identifiers = [identifiers]
+
+        image_data = []
+
+        for identifier in identifiers:
+
+            if identifier in self.series_index_metadata.keys():
+                image_data.append(self._get_images_by_series_id(identifier))
+
+            elif identifier in self.image_metadata['image_identifier'].tolist():
+                image_data.append(self._get_images_by_image_id(identifier))
+
+            else:
+                print('{} not found.'.format(identifier))
+
+        return pd.concat(image_data)
+
+    def _get_images_by_series_id(self, series_identifier: str):
+
+        series_df = self.series_index_metadata[series_identifier].copy()
         series_df.sort_values(by='identifier', inplace=True)
         series_mask = self.image_metadata['image_path'].isin(series_df['identifier'])
         
@@ -215,3 +243,9 @@ class DataHandler:
         merged = pd.merge(series_df, image_df, left_on='identifier', right_on='image_path')
 
         return merged
+
+    def _get_images_by_image_id(self, image_identifier: str):
+        mask = self.image_metadata['image_identifier'] == image_identifier
+        image_df = self.image_metadata.copy()[mask]        
+        return image_df
+    

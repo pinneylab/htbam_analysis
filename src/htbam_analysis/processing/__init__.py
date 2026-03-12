@@ -22,7 +22,7 @@ class Processor:
         self.image_data = image_data
 
         self.features = features
-        assert self.features in ('button', 'chamber', 'all'), "features argument must be 'button', 'chamber', or'all'."
+        assert self.features in ('button', 'chamber', 'all'), "features argument must be 'button', 'chamber', or 'all'."
 
         self.reference_images = {dname: None for dname in self.experiment.devices}
         
@@ -81,6 +81,7 @@ class Processor:
         **kwargs
     ):
         """High-level dispatcher that handles the mutual exclusivity logic."""
+        
         if use_reference:
             if corners:
                 raise ValueError("Cannot provide manual inputs when use_reference=True.")
@@ -111,13 +112,13 @@ class Processor:
             chip_image.stamp()
             self._process_features(chip_image, coerce_chamber_center)
 
-            processed_data = chip_image.summarize()
-            metadata = pd.DataFrame([self.image_data.iloc[i]] * len(processed_data))
+            processed_data = chip_image.summarize().reset_index()
+            metadata = pd.DataFrame([self.image_data.iloc[i]] * len(processed_data)).reset_index(drop=True)
             merged = pd.concat([metadata, processed_data], axis=1)
             data.append(merged)
             
             if summary_image_dir:
-                self._save_summary_image(summary_image_dir, image, chip_image)
+                self._save_summary_image(summary_image_dir, image, chip_image, self.features)
         
         return pd.concat(data, ignore_index=False)
 
@@ -140,9 +141,8 @@ class Processor:
             chip_image.stamp()
             reference.mapto(chip_image, features=self.features)
             
-            processed_data = chip_image.summarize().reset_index(drop=True)
+            processed_data = chip_image.summarize().reset_index()
             metadata = pd.DataFrame([self.image_data.iloc[i]] * len(processed_data)).reset_index(drop=True)
-            # print(set(list(processed_data.columns)).intersection(set(list(metadata.columns))))
             merged = pd.concat([metadata, processed_data], axis=1)
             data.append(merged)
             

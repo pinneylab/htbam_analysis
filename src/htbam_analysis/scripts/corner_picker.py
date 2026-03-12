@@ -43,7 +43,7 @@ corner_slices = compute_corner_slices(stitched_image)
 plots = []
 click_sources = []
 corner_coords = [None] * 4
-coord_display = Div(text="COPY/PASTE ME INTO PROCESSING NOTEBOOK: (None, None), (None, None), (None, None), (None, None)", styles={"font-size": "20px"})
+coord_display = Div(text="COPY/PASTE ME INTO PROCESSING NOTEBOOK: [(None, None), (None, None), (None, None), (None, None)]", styles={"font-size": "20px"})
 
 image_sources = []  # To store the original cropped images
 image_renderers = []  # To update image brightness later
