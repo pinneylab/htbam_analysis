@@ -69,7 +69,7 @@ class ImageStitcher:
     
         # make absolute image paths
         raster_data['image_path'] = raster_data['image_path'].apply(Path)
-        raster_data['image_path'] = raster_data['image_path'].apply(lambda p: self._raw_images_path / p)
+        raster_data['image_path'] = raster_data['image_path'].apply(lambda p: self.root_path / p)
         raster_data['image_path_parent'] = raster_data['image_path'].apply(lambda p: p.parent)
 
         # force integer type for width and height of rasters

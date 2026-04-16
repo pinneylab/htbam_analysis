@@ -25,7 +25,7 @@ class Processor:
         assert self.features in ('button', 'chamber', 'all'), "features argument must be 'button', 'chamber', or 'all'."
 
         self.reference_images = {dname: None for dname in self.experiment.devices}
-        
+                
         # print('Loaded the following images:')
         # for image in image_data['image_path']:
         #     print(image)

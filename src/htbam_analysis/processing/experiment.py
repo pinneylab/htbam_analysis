@@ -10,9 +10,10 @@
 
 
 import json
+import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Union, Tuple
+from typing import Union, Tuple, List
 from collections import namedtuple
 
 
@@ -173,6 +174,10 @@ class DataHandler:
 
         self._root = Path(root) if isinstance(root, str) else root
         assert self._root.exists(), 'root path: {} does not exist'.format(self._root)
+
+        self._raw_images = self._root / 'raw_images'
+        assert self._raw_images.exists(), 'raw_images: {} does not exist.'.format(self._raw_images)
+
         self._bsgub_images = root / 'bgsub_images'
         assert self._bsgub_images.exists(), 'bgsub_images: {} does not exist.'.format(self._bgsub_images)
 
@@ -205,7 +210,11 @@ class DataHandler:
         for series in series_index:
             identifier = series['identifier']
             df = series_to_dataframe(series)
-            df['identifier'] = df['identifier'].apply(lambda f: self._bsgub_images / Path(f).with_suffix('.tif'))
+
+            # TODO: make this less hacky
+            # df['identifier'] = df['identifier'].apply(lambda f: self._bsgub_images / Path(f).with_suffix('.tif'))
+            df['identifier'] = df['identifier'].apply(lambda f: self._bsgub_images / Path(*Path(f).parts[1:]).with_suffix('.tif'))
+
             series_metadata[identifier] = df
             
         return series_metadata
@@ -218,7 +227,6 @@ class DataHandler:
         image_data = []
 
         for identifier in identifiers:
-
             if identifier in self.series_index_metadata.keys():
                 image_data.append(self._get_images_by_series_id(identifier))
 
