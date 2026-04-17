@@ -50,6 +50,32 @@ from htbam_analysis.stitching import rastering
 #         return False, None, f'Error processing {dir}: {str(e)}'
 
 
+class Stitcher:
+
+    def __init__(self, root: Union[str, Path]):
+
+        root = Path(root) if not isinstance(root, Path) else root
+        self.root = root
+        self.image_metadata = self._load_image_metadata()
+        
+        self.rotation = None
+        self.acqui_ori = (True, False)
+        
+    def _load_image_metadata(self):
+        path = self.root / 'imaging.csv'
+        assert path.exists()
+        return pd.read_csv(path)
+    
+    def set_rotation(self, rotation: float):
+        self.rotation = rotation
+
+    def set_acqui_ori(self, acqui_ori: Tuple[bool]):
+        self.acqui_ori = acqui_ori
+
+    def stitch_images(self):
+        stitch_images()
+
+
 def stitch_single_raster(
     raster: List[Path],
     raster_params: rastering.RasterParams,
