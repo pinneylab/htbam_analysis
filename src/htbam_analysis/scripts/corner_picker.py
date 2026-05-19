@@ -43,7 +43,7 @@ corner_slices = compute_corner_slices(stitched_image)
 plots = []
 click_sources = []
 corner_coords = [None] * 4
-coord_display = Div(text="COPY/PASTE ME INTO PROCESSING NOTEBOOK: (None, None), (None, None), (None, None), (None, None)", styles={"font-size": "20px"})
+coord_display = Div(text="COPY/PASTE ME INTO PROCESSING NOTEBOOK: [(None, None), (None, None), (None, None), (None, None)]", styles={"font-size": "20px"})
 
 image_sources = []  # To store the original cropped images
 image_renderers = []  # To update image brightness later
@@ -88,10 +88,10 @@ for idx, s in enumerate(corner_slices):
             x_offset = 0
             corner_coords[i] = (event.x + x_offset, event.y + y_offset)
 
-            formatted = "COPY/PASTE ME INTO PROCESSING NOTEBOOK: " + ", ".join(
-                f"(({f'{pt[0]:.0f}' if pt is not None else 'None'}, {f'{pt[1]:.0f}' if pt is not None else 'None'}))"
+            formatted = "COPY/PASTE ME INTO PROCESSING NOTEBOOK: " + '[' + ", ".join(
+                f"({f'{pt[0]:.0f}' if pt is not None else 'None'}, {f'{pt[1]:.0f}' if pt is not None else 'None'})"
                 for pt in corner_coords
-            )
+            ) + ']'
 
             coord_display.text = formatted
         return on_tap

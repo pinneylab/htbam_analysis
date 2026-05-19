@@ -23,6 +23,7 @@ scikit-image = ">=0.22,<1"
 pillow = ">=10,<12"
 tqdm = ">=4.64,<5"
 basicpy = ">=1.1,<2"
+hyperactive = "4.6.1"
 
 [tool.poetry.scripts]
 pick-corners = "htbam_analysis.scripts.run_corner_picker:main"
