@@ -18,11 +18,13 @@ This is a *WORK IN PROGRESS* package for processing and analysing various assays
 
 (Recommended) Create a fresh conda environment with python=3.9 using:
 
-```conda create -n htbam_analysis python=3.9```
+```conda create -n htbam_analysis python=3.11```
 
 and activate using:
 
 ```conda activate htbam_analysis```
+
+[Note: python versions after 3.11 may have errors on Apple Silicon, due to Scipy compilation]
 
 #### Intall Stable Release via Wheel File
 Download the latest wheel file from the [Release Page](https://github.com/pinneylab/htbam_analysis/releases)
