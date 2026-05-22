@@ -64,7 +64,8 @@ class Processor:
             assert isinstance(y, int)
 
         device_mask = self.image_data['dname'] == dname
-        self.image_data.loc[device_mask, 'corners'] = [corners] * int(device_mask.sum())
+        for idx in self.image_data[device_mask].index:
+            self.image_data.at[idx, 'corners'] = corners
 
     def set_reference(
         self, 

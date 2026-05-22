@@ -445,7 +445,7 @@ class Raster(ABC):
             stitchDir = pathlib.Path(os.path.join(self._params.parent, out_path_name))
         stitchDir.mkdir(exist_ok=True)
         outDir = os.path.join(stitchDir, rasterName)
-        io.imsave(outDir, stitchedRaster, plugin="tifffile", check_contrast=False)
+        io.imsave(outDir, stitchedRaster, check_contrast=False)#, plugin="tifffile", check_contrast=False)
         logging.debug("Stitching Complete")
 
     def __lt__(self, other):

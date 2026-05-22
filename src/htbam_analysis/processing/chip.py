@@ -130,7 +130,7 @@ class ChipImage:
             [[x, y] for x in range(0, xdim) for y in range(0, ydim)]
         ).reshape(xdim, ydim, 2)
 
-        a = np.empty((xdim, ydim), dtype=np.object)
+        a = np.empty((xdim, ydim), dtype=object)
         for x, y in indices.reshape((xdim * ydim, 2)):
             stamp = imgstamps[x, y]
             center = self.centers[x, y]
@@ -536,7 +536,7 @@ class Stamp:
         imageCopy = img.copy()
         mask = np.zeros(imageCopy.shape)
         cv2.circle(mask, center, radius, 1, -1)  # Warning: MODIFIES mask IN PLACE!!
-        mask = mask.astype(np.bool)
+        mask = mask.astype(bool)
 
         insert = np.where(mask)
         intensities = img[insert]
@@ -576,7 +576,7 @@ class Stamp:
                 warnings.simplefilter(
                     "ignore"
                 )  # Will throw warning due to precision loss
-                cimg = skimage.img_as_ubyte(img, force_copy=True)
+                cimg = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
             # searchRadii
             minRad = chamberRadius

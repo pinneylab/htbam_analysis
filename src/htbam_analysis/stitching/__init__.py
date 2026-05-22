@@ -13,9 +13,35 @@ import shutil
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from skimage import io
+from skimage import io, filters, transform
 from pathlib import Path
-from typing import Tuple, Union, List
+from typing import Tuple, Union, List, Optional
+
+def _get_grid_angle(image_path: Path) -> float:
+    """Helper function to find the grid rotation angle of a single raw image."""
+    img = io.imread(image_path)
+    
+    # We only care about the center part to speed up and avoid edge effects
+    h, w = img.shape
+    crop = img[h//4:3*h//4, w//4:3*w//4]
+    
+    # Normalize the crop to handle different exposures
+    crop = crop.astype(float)
+    if crop.max() > crop.min():
+        crop = (crop - crop.min()) / (crop.max() - crop.min())
+        
+    # Edge detection
+    edges = filters.sobel(crop)
+    
+    # Test angles from -5 to 5 degrees
+    angles = np.linspace(-5, 5, 200, endpoint=False)
+    sinogram = transform.radon(edges, theta=angles, circle=True)
+    
+    variances = np.var(sinogram, axis=0)
+    best_angle = angles[np.argmax(variances)]
+    
+    # Return negative angle because of rotation sign convention
+    return -best_angle
 
 
 def stitch_single_raster(
@@ -44,7 +70,7 @@ def stitch_single_raster(
     stitched_image = raster_obj.stitch()
     
     # Save the stitched image
-    io.imsave(stitched_image_path, stitched_image, plugin="tifffile", check_contrast=False)
+    io.imsave(stitched_image_path, stitched_image, check_contrast=False)#, plugin="tifffile"
         
     return True, stitched_image_path, None
 
@@ -85,7 +111,49 @@ class ImageStitcher:
 
         return raster_data
 
-    def stitch_images(self, rotation: float, acqui_origin: Tuple[bool] = (True, False)):
+    def find_optimal_rotation(self, raster_path: Union[Path, str], max_samples: int = 5) -> float:
+        """
+        Automatically determine the optimal rotation for a given raster
+        by analyzing the grid angle of a few sample raw images.
+        """
+        raster_path = Path(raster_path) if not isinstance(raster_path, Path) else raster_path
+        mask = self.raster_data['image_path_parent'] == raster_path
+        df = self.raster_data[mask]
+        
+        if df.empty:
+            raise ValueError(f"No raster data found for {raster_path}")
+            
+        # Try to sample from the center of the raster to avoid edge artifacts
+        try:
+            width = df['raster_width'].iloc[0]
+            height = df['raster_height'].iloc[0]
+            center_df = df[
+                (df['raster_col_index'] > 0) & (df['raster_col_index'] < width - 1) &
+                (df['raster_row_index'] > 0) & (df['raster_row_index'] < height - 1)
+            ]
+            if len(center_df) >= max_samples:
+                sample_images = center_df['image_path'].sample(n=max_samples, random_state=42).to_list()
+            else:
+                sample_images = df['image_path'].sample(n=min(max_samples, len(df)), random_state=42).to_list()
+        except KeyError:
+            # Fallback if raster_col_index or width aren't present
+            sample_images = df['image_path'].sample(n=min(max_samples, len(df)), random_state=42).to_list()
+        
+        angles = []
+        for img_path in sample_images:
+            try:
+                angle = _get_grid_angle(img_path)
+                angles.append(angle)
+            except Exception as e:
+                print(f"Warning: Failed to compute grid angle for {img_path}: {e}")
+                
+        if not angles:
+            print("Failed to auto-detect rotation, defaulting to 0.0")
+            return 0.0
+            
+        return float(np.median(angles))
+
+    def stitch_images(self, rotation: Optional[float] = None, acqui_origin: Tuple[bool] = (True, False)):
 
         assert isinstance(self.raster_data, pd.DataFrame), 'Raster data has not been set.'
 
@@ -95,6 +163,12 @@ class ImageStitcher:
         stitched_image_data = []
 
         grouped = self.raster_data.groupby('image_path_parent')
+
+        if rotation is None:
+            first_group_path = list(grouped.groups.keys())[0]
+            print(f"Auto-detecting optimal rotation from raster: {first_group_path}")
+            rotation = self.find_optimal_rotation(first_group_path)
+            print(f"Using optimal rotation: {rotation:.3f} degrees")
 
         success_counter = 0
         for image_parent, df in tqdm(grouped, desc='Stitching images.'):
@@ -289,7 +363,7 @@ class BackgroundSubtractor:
                             # subtract and save
                             target_image = io.imread(target_image_path)
                             subtracted_image = backgroud_subtract(background_image, target_image)
-                            io.imsave(outfile, subtracted_image, plugin="tifffile", check_contrast=False)
+                            io.imsave(outfile, subtracted_image, check_contrast=False)#, plugin="tifffile"
 
                         except Exception as e:
                             # "subtract" a zero array
