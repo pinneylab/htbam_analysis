@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 
 # HTBAM
-from htbam_db_api.htbam_db_api import AbstractHtbamDBAPI, HtbamDBException
-from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
+from htbam_analysis.db_api.htbam_db_api import AbstractHtbamDBAPI, HtbamDBException
+from htbam_analysis.db_api.data import Data4D, Data3D, Data2D, Meta
 from htbam_analysis.analysis.plot import plot_chip
 from htbam_analysis.analysis.fit import mm_model
 #from htbam_analysis.analysis.fit import fit_luminance_vs_time, fit_luminance_vs_concentration

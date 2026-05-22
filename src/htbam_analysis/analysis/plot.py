@@ -24,7 +24,7 @@ def find_free_port(start_port=8050):
     raise Exception("No free ports found in range 8050-8100")
 
 # HTBAM Data
-from htbam_db_api.data import Data4D, Data3D, Data2D
+from htbam_analysis.db_api.data import Data4D, Data3D, Data2D
 
 # Plotting
 import seaborn as sns
@@ -247,7 +247,7 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
 
     free_port = find_free_port()
     print(f"Running on port: {free_port}")
-    app.run_server(port=free_port)
+    app.run(port=free_port)
 
 def plot_chip_by_variable(experiment: 'HTBAMExperiment', analysis_name: str, variable: str):
     '''

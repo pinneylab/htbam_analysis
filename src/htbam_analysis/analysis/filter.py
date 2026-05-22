@@ -3,8 +3,8 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 from copy import deepcopy
 from typing import List, Dict
-from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
-from htbam_db_api.units import units
+from htbam_analysis.db_api.data import Data4D, Data3D, Data2D, Meta
+from htbam_analysis.db_api.units import units
 
 ### Per-well filters
 # Standard curve R2 cutoff

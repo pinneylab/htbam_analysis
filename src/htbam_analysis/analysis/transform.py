@@ -12,7 +12,7 @@
 #     Parameters
 #     ----------
 #     data : dict
-#         Dictionary in "RFU_data" format (see htbam_db_api.py).
+#         Dictionary in "RFU_data" format (see htbam_analysis.db_api.py).
 #     apply_to : str
 #         Key in data["dep_vars"] to apply the function to.
 #     store_as : str
@@ -46,7 +46,7 @@
 import numpy as np
 from copy import deepcopy
 import pint
-from htbam_db_api.units import units
+from htbam_analysis.db_api.units import units
 
 def transform_data(
     data_objs: list,        # list of Data2D, Data3D, Data4D instances (all same class and shape)
