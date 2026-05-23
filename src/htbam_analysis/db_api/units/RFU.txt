@@ -1,0 +1,3 @@
+# Relative Fluorescence Units
+## Since this is a device-specific measurement, it cannot be converted to SI units without calibration data.
+RFU = [relative_fluorescence_units]

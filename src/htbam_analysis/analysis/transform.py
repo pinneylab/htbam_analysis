@@ -12,7 +12,7 @@
 #     Parameters
 #     ----------
 #     data : dict
-#         Dictionary in "RFU_data" format (see htbam_db_api.py).
+#         Dictionary in "RFU_data" format (see htbam_analysis.db_api.py).
 #     apply_to : str
 #         Key in data["dep_vars"] to apply the function to.
 #     store_as : str
@@ -45,6 +45,8 @@
 
 import numpy as np
 from copy import deepcopy
+import pint
+from htbam_analysis.db_api.units import units
 
 def transform_data(
     data_objs: list,        # list of Data2D, Data3D, Data4D instances (all same class and shape)
@@ -52,6 +54,7 @@ def transform_data(
     output_name: str,      # name of the new field, e.g. "difference"
     expression_vars: dict = None,  # optional mapping of name -> object to be available in expr
     keep_existing: bool = False,  # if True, keep existing dep_var fields and append/replace the new field
+    simplify_units: bool = True,
 ):
     """
     Return a new object of the same class as data_objs[0] in which:
@@ -113,7 +116,7 @@ def transform_data(
         __array_priority__ = 1000
 
         def __init__(self, arr, sample_ids):
-            self.arr = np.asarray(arr)
+            self.arr = arr
             self.sample_ids = np.asarray(sample_ids)
             if self.arr.shape[-1] != self.sample_ids.shape[0]:
                 raise ValueError("sample_IDs length must match chamber axis length")
@@ -149,7 +152,8 @@ def transform_data(
 
                 # Call the reduction function on the group along its last axis
                 res = func(*new_args, **kwargs2)
-                per_sample.append(np.asarray(res))
+                #per_sample.append(np.asarray(res))
+                per_sample.append(res)
 
             # Stack results into shape (..., n_samples, ...extra)
             stacked = np.stack(per_sample, axis=-1)
@@ -187,7 +191,8 @@ def transform_data(
             if field_name not in self._obj.dep_var_type:
                 raise AttributeError(field_name)
             idx = self._obj.dep_var_type.index(field_name)
-            arr = self._obj.dep_var[..., idx]
+            unit = self._obj.dep_var_units[idx]
+            arr = self._obj.dep_var[..., idx] * unit
             return GroupedField(arr, self._obj.indep_vars.sample_IDs)
 
     class DeviceField:
@@ -200,7 +205,8 @@ def transform_data(
         __array_priority__ = 1000
 
         def __init__(self, arr):
-            self.arr = np.asarray(arr)
+            # Np array or pint Quantity
+            self.arr = arr
 
         def _reduce_across_device(self, func, *args, **kwargs):
             # Default to axis=-1 (chamber axis) if not provided
@@ -217,7 +223,7 @@ def transform_data(
 
             # Call the reduction
             res = func(*new_args, **kwargs2)
-            res = np.asarray(res)
+            #res = np.asarray(res)
 
             # Figure out which axis the reduction used (normalize negative indices)
             axis_used = kwargs2.get('axis', None)
@@ -253,7 +259,7 @@ def transform_data(
                 # Insert chamber axis before any extra tail dims
                 insert_at = len(prefix)
                 expanded = np.expand_dims(res, axis=insert_at)
-                mapped = np.repeat(expanded, n_chambers, axis=insert_at)
+                mapped = expanded.repeat(n_chambers, axis=insert_at)
                 return mapped
 
             # Reduction wasn't along chamber axis — return as-is
@@ -283,7 +289,8 @@ def transform_data(
             if field_name not in self._obj.dep_var_type:
                 raise AttributeError(field_name)
             idx = self._obj.dep_var_type.index(field_name)
-            arr = self._obj.dep_var[..., idx]
+            unit = self._obj.dep_var_units[idx]
+            arr = self._obj.dep_var[..., idx] * unit
             return DeviceField(arr)
 
     class DataProxy:
@@ -301,7 +308,13 @@ def transform_data(
             # Return raw per-chamber array for dep_var fields
             if name in self._obj.dep_var_type:
                 idx = self._obj.dep_var_type.index(name)
-                return self._obj.dep_var[..., idx]
+                unit = self._obj.dep_var_units[idx]
+                return self._obj.dep_var[..., idx] * unit
+            
+            # Expose chamber_IDs and sample_IDs from indep_vars
+            if name in ["chamber_IDs", "sample_IDs"]:
+                return getattr(self._obj.indep_vars, name)
+
             raise AttributeError(name)
 
     for i, obj in enumerate(data_objs):
@@ -315,7 +328,8 @@ def transform_data(
             key = prefix + field_name
             if key in namespace:
                 raise ValueError(f"Namespace conflict: '{key}' already exists.")
-            namespace[key] = obj.dep_var[..., idx]
+            # Adding the array, with units!
+            namespace[key] = obj.dep_var[..., idx] * obj.dep_var_units[idx]
     
     # If the caller provided named variables to be available in the expression,
     # merge them into the namespace. This lets callers pass real objects (e.g.
@@ -348,25 +362,41 @@ def transform_data(
     except Exception as e:
         raise RuntimeError(f"Error evaluating expression {expr!r}: {e}")
 
+    # If it's a pint quantity, simplify the units:
+    if isinstance(result, pint.Quantity):
+        if simplify_units:
+            result = result.to_reduced_units()
+
     # 5) Ensure result is a NumPy array of the correct shape
-    if not isinstance(result, np.ndarray):
+    if not isinstance(result, np.ndarray) and not isinstance(result, pint.Quantity):
         result = np.array(result)
 
     expected_shape = base_shape[:-1]
     if result.shape != expected_shape:
-        raise ValueError(
-            f"After evaluating {expr!r}, got result.shape = {result.shape}, "
-            f"but expected {expected_shape}."
-        )
+        try:
+            # Attempt to broadcast to the expected shape (e.g. broadcasting chamber-level data to time-level)
+            result = np.broadcast_to(result, expected_shape)
+        except ValueError:
+             raise ValueError(
+                f"After evaluating {expr!r}, got result.shape = {result.shape}, "
+                f"but expected {expected_shape} (and broadcasting failed)."
+            )
 
     # 6) Expand the last axis so that new dep_var has final dim = 1
     new_transformed = result[..., np.newaxis]
+    
+    if isinstance(result, pint.Quantity):
+        new_transformed_units = result.units
+        new_transformed = new_transformed.magnitude # Proper way to convert to np array (without warnings)
+    else:
+        new_transformed_units = units.dimensionless
 
     # If caller wants to keep existing dep_vars, combine them with the new one
     if keep_existing:
         # original dep_var and dep_var_type from first object
         orig_dep = data_objs[0].dep_var
         orig_types = list(data_objs[0].dep_var_type)
+        orig_units = list(data_objs[0].dep_var_units)
 
         # If output_name already exists, replace that column; otherwise append
         if output_name in orig_types:
@@ -380,6 +410,7 @@ def transform_data(
             combined[..., replace_idx] = new_transformed[..., 0]
             combined = combined  # shape unchanged
             combined_types = orig_types
+            combined_units = orig_units
         else:
             # concatenate along final axis
             if orig_dep.shape[:-1] != new_transformed.shape[:-1]:
@@ -388,12 +419,16 @@ def transform_data(
                 )
             combined = np.concatenate([orig_dep, new_transformed], axis=-1)
             combined_types = orig_types + [output_name]
+            combined_units = orig_units + [new_transformed_units]
 
         final_dep_var = combined
         final_dep_var_type = combined_types
+        final_dep_var_units = combined_units
+
     else:
-        final_dep_var = new_transformed
+        final_dep_var = np.array(new_transformed)
         final_dep_var_type = [output_name]
+        final_dep_var_units = [new_transformed_units]
 
     # 7) Build the output object—same class as first, same indep_vars, new dep_var + dep_var_type
     NewClass = base_class
@@ -403,6 +438,7 @@ def transform_data(
             indep_vars   = data_objs[0].indep_vars, # deep-copied by DataND constructor
             dep_var      = final_dep_var,
             dep_var_type = final_dep_var_type,
+            dep_var_units = final_dep_var_units,
             meta         = deepcopy(data_objs[0].meta)
         )
     except TypeError:

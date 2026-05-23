@@ -12,13 +12,15 @@ import numpy as np
 import pandas as pd
 
 # HTBAM
-from htbam_db_api.htbam_db_api import AbstractHtbamDBAPI, HtbamDBException
-from htbam_db_api.data import Data4D, Data3D, Data2D, Meta
+from htbam_analysis.db_api.htbam_db_api import AbstractHtbamDBAPI, HtbamDBException
+from htbam_analysis.db_api.data import Data4D, Data3D, Data2D, Meta
 from htbam_analysis.analysis.plot import plot_chip
+from htbam_analysis.analysis.fit import mm_model
 #from htbam_analysis.analysis.fit import fit_luminance_vs_time, fit_luminance_vs_concentration
 
 # Plotting
 import seaborn as sns
+import matplotlib.pyplot as plt
 
 
 class HTBAMExperiment:
@@ -117,537 +119,18 @@ class HTBAMExperiment:
             indep_vars=run_data.indep_vars,
             dep_var=new_dep_var,
             dep_var_type=run_data.dep_var_type,
+            dep_var_units=run_data.dep_var_units,
             meta=meta
         )
         self.set_run(save_as, masked)
 
-
-    ### PLOTTING ###
-    def plot_chip_by_variable(self, analysis_name: str, variable: str):
-        '''
-        Plot a full chip with raw data and a specified variable.
-
-        Parameters:
-            analysis_name (str): the name of the analysis to be plotted.
-            variable (str): the name of the variable to be plotted.
-
-        Returns:
-            None
-        '''
-        #plotting variable: We'll plot by luminance. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
-        
-        analysis_data = self.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
-        
-        plotting_var = variable
-
-        # Verify we have the variable:
-        if plotting_var not in analysis_data.dep_var_type:
-            raise ValueError(f"'{plotting_var}' not found in analysis data. Available variables: {analysis_data.dep_vars_types}")
-        else:
-            plotting_var_index = analysis_data.dep_var_type.index(plotting_var)
-
-        concentration = analysis_data.dep_var[..., plotting_var_index]  # (n_chambers, n_conc, 1)
-       
-        #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
-        #chamber_names_dict = self._db_conn.get_chamber_name_dict()
-        chamber_names = analysis_data.indep_vars.chamber_IDs # (n_chambers,)
-        sample_names =  analysis_data.indep_vars.sample_IDs # (n_chambers,)
-
-        # Create dictionary mapping chamber_id -> sample_name:
-        sample_names_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            sample_names_dict[chamber_id] = sample_names[i]
-
-        # Create dictionary mapping chamber_id -> concentration:
-        concentration_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            concentration_dict[chamber_id] = concentration[i]
-            
-
-        #plotting function: We'll generate a subplot for each chamber, showing a histogram across replicates with our chosen chamber in red.
-        def plot_chamber_variable(chamber_id, ax):
-            #parameters:
-            # get the sample_ID for this chamber:
-            sample_id = sample_names_dict[chamber_id]
-            # Get all replicates with this sample_id:
-            repl_indices = [i for i, s in enumerate(sample_names) if s == sample_id]
-            # Get the concentration values for these replicates:
-            repl_concentrations = concentration[repl_indices]
-
-            #x_data = concentration_dict[chamber_id]
-            ax.hist(repl_concentrations, bins=10)
-            # add the current datapoint as a red bar:
-            ax.axvline(concentration_dict[chamber_id], color='red', linestyle='dashed', linewidth=2)
-            ax.set_title(f'{chamber_id}: {sample_names_dict[chamber_id]}')
-            ax.set_xlabel(f'{plotting_var}')
-            ax.set_ylabel('Count')
-            return ax
-
-        plot_chip(concentration_dict, sample_names_dict, title=f'Analysis: {plotting_var}', graphing_function=plot_chamber_variable)
-
-    def plot_standard_curve_chip(self, analysis_name: str, experiment_name: str):
-        '''
-        Plot a full chip with raw data and std curve slopes.
-
-        Parameters:
-            analysis_name (str): the name of the analysis to be plotted.
-            experiment_name (str): the name of the raw experiment data to be plotted.
-
-        Returns:
-            None
-        '''
-        #plotting variable: We'll plot by luminance. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
-        
-        experiment_data = self.get_run(experiment_name) # Raw data from experiment (to show datapoints)
-        analysis_data = self.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
-
-        slope_idx = analysis_data.dep_var_type.index('slope')          # index of slope in dep_vars
-        intercept_idx = analysis_data.dep_var_type.index('intercept')  # index of intercept in dep_vars
-        r_squared_idx = analysis_data.dep_var_type.index('r_squared')  # index of r_squared in dep_vars
-        
-        # Extract slopes and intercepts from analysis data
-        slopes_to_plot = analysis_data.dep_var[..., slope_idx]          # (n_chambers,)
-        intercepts_to_plot = analysis_data.dep_var[..., intercept_idx]  # (n_chambers,)
-        r_squared = analysis_data.dep_var[..., r_squared_idx]  # (n_chambers,)
-
-        # Extract luminance and concentration from experiment data
-        luminance_idx = experiment_data.dep_var_type.index('luminance')  # index of luminance in dep_vars
-        luminance = experiment_data.dep_var[..., luminance_idx]  # (n_chambers, n_timepoints, n_conc)
-        concentration = experiment_data.indep_vars.concentration # (n_conc,)
-        
-        #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
-        chamber_names = experiment_data.indep_vars.chamber_IDs # (n_chambers,)
-        sample_names =  experiment_data.indep_vars.sample_IDs # (n_chambers,)
-
-        # Create dictionary mapping chamber_id -> sample_name:
-        sample_names_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            sample_names_dict[chamber_id] = sample_names[i]
-
-        # Create dictionary mapping chamber_id -> slopes:
-        slopes_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            slopes_dict[chamber_id] = slopes_to_plot[i]
-
-        #plotting function: We'll generate a subplot for each chamber, showing the raw data and the linear regression line.
-        # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
-        def plot_chamber_slopes(chamber_id, ax):
-            #parameters:
-
-            x_data = concentration
-            y_data = luminance[:, -1, chamber_names == chamber_id] # using last timepoint
-            
-            m = slopes_to_plot[chamber_names == chamber_id]
-            b = intercepts_to_plot[chamber_names == chamber_id]
-            
-            #make a simple matplotlib plot
-            ax.scatter(x_data, y_data)
-            if not (np.isnan(m) or np.isnan(b)):
-                #return False, no_update, no_update
-                ax.plot(x_data, m*np.array(x_data) + b)
-                ax.set_title(f'{chamber_id}: {sample_names_dict[chamber_id]}')
-                ax.set_xlabel('Concentration')
-                ax.set_ylabel('Luminance (RFU)')
-            return ax
-        
-        plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
-
-    def plot_initial_rates_chip(self, analysis_name: str, experiment_name: str, skip_start_timepoint: bool = True,
-                               plot_xmax: float = None, plot_ymax: float = None,
-                               plot_xmin: float = None, plot_ymin: float = None):
-        '''
-        Plot a full chip with raw data and fit initial rates.
-
-        Parameters:
-            analysis_name (str): the name of the analysis to be plotted.
-            experiment_name (str): the name of the experiment to be plotted.
-            skip_start_timepoint (bool): whether to skip the first timepoint in the analysis (Sometimes are unusually low). Default is True.
-
-        Returns:
-            None
-        '''
-        #plotting variable: We'll plot by luminance. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
-        
-        experiment_data = self.get_run(experiment_name) # Raw data from experiment (to show datapoints)
-        analysis_data = self.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
-        
-        # Extract slopes and intercepts from analysis data
-        slopes_idx = analysis_data.dep_var_type.index('slope')          # index of slope in dep_vars
-        intercepts_idx = analysis_data.dep_var_type.index('intercept')  # index of intercept in dep_vars
-        r_squared_idx = analysis_data.dep_var_type.index('r_squared')  # index of r_squared in dep_vars
-
-        # Extract slopes and intercepts from analysis data
-        slopes_to_plot = analysis_data.dep_var[..., slopes_idx]          # (n_chambers, n_conc)
-        intercepts_to_plot = analysis_data.dep_var[..., intercepts_idx]  # (n_chambers, n_conc)
-        r_squared = analysis_data.dep_var[..., r_squared_idx]          # (n_chambers, n_conc)
-
-        # Extract product_concentration (Y) from experiment data
-        product_conc_idx = experiment_data.dep_var_type.index('concentration')  # index of luminance in dep_vars
-        product_conc = experiment_data.dep_var[..., product_conc_idx]  # (n_chambers, n_timepoints, n_conc)
-        substrate_conc = experiment_data.indep_vars.concentration # (n_conc,)
-        time_data = experiment_data.indep_vars.time # (n_conc, n_timepoints)
-
-        # If skip_start_timepoint is True, we'll skip the first timepoint in the analysis
-        if skip_start_timepoint:
-            product_conc = product_conc[:, 1:, :] # (n_chambers, n_timepoints-1, n_conc)
-            time_data = time_data[:, 1:] # (n_conc, n_timepoints-1)
-            #slopes_to_plot = slopes_to_plot[:, 1:]
-       
-        #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
-        #chamber_names_dict = self._db_conn.get_chamber_name_dict()
-        chamber_names = experiment_data.indep_vars.chamber_IDs # (n_chambers,)
-        sample_names =  experiment_data.indep_vars.sample_IDs # (n_chambers,)
-        
-        # Create dictionary mapping chamber_id -> sample_name:
-        sample_names_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            sample_names_dict[chamber_id] = sample_names[i]
-
-        # Create dictionary mapping chamber_id -> mean slopes:
-        slopes_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            slopes_dict[chamber_id] = np.nanmean(slopes_to_plot[:, i])
-
-        #plotting function: We'll generate a subplot for each chamber, showing the raw data and the linear regression line.
-        # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
-
-        def plot_chamber_initial_rates(chamber_id, ax):#, time_to_plot=time_to_plot):
-            #N.B. Every so often, slope and line colors don't match up. Not sure why.
-            
-            #convert from 'x,y' to integer index in the array:
-            #data_index = list(self._run_data[run_name]["chamber_idxs"]).index(chamber_id)
-            x_data = time_data # same for all chambers              (n_timepoints, n_conc)
-            y_data = product_conc[:, :, chamber_names == chamber_id]  #(n_timepoints, n_conc)
-        
-            m = slopes_to_plot[:, chamber_names == chamber_id]
-            b = intercepts_to_plot[:, chamber_names == chamber_id]
-            
-            colors = sns.color_palette('husl', n_colors=y_data.shape[0])
-
-            for i in range(y_data.shape[0]): #over each substrate concentration:
-
-                ax.scatter(x_data[i], y_data[i,:].flatten(), color=colors[i], alpha=0.3) # raw data
-                ax.plot(x_data[i], m[i]*x_data[i] + b[i], color=colors[i], alpha=1, linewidth=2, label=f'{substrate_conc[i]}')  # fitted line
-
-            # Set axis limits if provided
-            if plot_xmax is not None:
-                ax.set_xlim(right=plot_xmax)
-            if plot_ymax is not None:
-                ax.set_ylim(top=plot_ymax)
-            if plot_xmin is not None:
-                ax.set_xlim(left=plot_xmin)
-            if plot_ymin is not None:
-                ax.set_ylim(bottom=plot_ymin)
-            ax.legend()
-
-            return ax
-        
-        plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_initial_rates, title='Kinetics: Initial Rates')
-
-    def plot_initial_rates_vs_concentration_chip(self,
-                                                 analysis_name: str,
-                                                 model_fit_name: str = None,
-                                                 model_pred_data_name: str = None,
-                                                 x_log: bool = False,
-                                                 y_log: bool = False):
-        """
-        Plot initial rates vs substrate concentration for each chamber.
-        Optionally overlay fitted curve from `model_pred_data_name` and
-        annotate fit parameters from `model_fit_name`.
-        """
-        analysis: Data3D = self.get_run(analysis_name)
-        si = analysis.dep_var_type.index("slope")
-        slopes = analysis.dep_var[..., si]               # (n_conc, n_chambers)
-        conc   = analysis.indep_vars.concentration       # (n_conc,)
-
-        if model_pred_data_name:
-            mf_pred: Data3D = self.get_run(model_pred_data_name)
-            yi = mf_pred.dep_var_type.index("y_pred")
-            preds = mf_pred.dep_var[..., yi]           # (n_conc, n_chambers)
-
-        if model_fit_name:
-            mf_fit: Data2D = self.get_run(model_fit_name)
-            fit_types = mf_fit.dep_var_type           # e.g. ["v_max","K_m","r_squared"]
-            fit_vals = mf_fit.dep_var                # shape (n_chamb, len(fit_types))
-
-        chambers = analysis.indep_vars.chamber_IDs        # (n_chambers,)
-        samples  = analysis.indep_vars.sample_IDs         # (n_chambers,)
-        sample_names = {cid: samples[i] for i, cid in enumerate(chambers)}
-        mean_rates   = {cid: np.nanmean(slopes[:, i]) for i, cid in enumerate(chambers)}
-
-        def plot_rates_vs_conc(cid, ax):
-            idx = (chambers == cid)
-            x   = conc
-            y   = slopes[:, idx].flatten()
-            ax.scatter(x, y, alpha=0.7)
-
-            if model_pred_data_name:
-                y_p = preds[:, idx].flatten()
-                ax.plot(x, y_p, color="red", label="model")
-
-            if model_fit_name:
-                # extract this chamber's fit row
-                chamb_idx = np.where(chambers == cid)[0][0]
-                vals = fit_vals[chamb_idx]
-                txt = "".join(f"{nm}={v:.2f}\n" for nm,v in zip(fit_types, vals))
-                ax.text(0.05, 0.95, txt, transform=ax.transAxes,
-                        va="top", fontsize=8, bbox=dict(boxstyle="round", fc="white", alpha=0.7))
-
-            if model_pred_data_name or model_fit_name:
-                ax.legend()
-            ax.set_title(f"{cid}: {sample_names[cid]}")
-            ax.set_xlabel("Concentration")
-            ax.set_ylabel("Initial Rate")
-            if x_log: ax.set_xscale("log")
-            if y_log: ax.set_yscale("log")
-            return ax
-
-        plot_chip(mean_rates, sample_names,
-                  graphing_function=plot_rates_vs_conc,
-                  title="Initial Rates vs Concentration")
-
-    def plot_MM_chip(self,
-                    analysis_name: str,
-                    model_fit_name: str,
-                    model_pred_data_name: str = None,
-                    x_log: bool = False,
-                    y_log: bool = False):
-        """
-        Plot MM values, with inset initial rates vs substrate concentration for each chamber.
-        Optionally overlay fitted curve from `model_pred_data_name` and
-        annotate fit parameters from `model_fit_name`.
-        """
-        analysis: Data3D = self.get_run(analysis_name)
-        si = analysis.dep_var_type.index("slope")
-        slopes = analysis.dep_var[..., si]               # (n_conc, n_chambers)
-        conc   = analysis.indep_vars.concentration       # (n_conc,)
-
-        mf_fit: Data2D = self.get_run(model_fit_name)
-        fit_types = mf_fit.dep_var_type           # e.g. ["v_max","K_m","r_squared"]
-        fit_vals = mf_fit.dep_var                # shape (n_chamb, len(fit_types))
-
-        mm_idx = mf_fit.dep_var_type.index("v_max")
-        mms = mf_fit.dep_var[..., mm_idx]    # (n_chambers,)
-
-        if model_pred_data_name:
-            mf_pred: Data3D = self.get_run(model_pred_data_name)
-            yi = mf_pred.dep_var_type.index("y_pred")
-            preds = mf_pred.dep_var[..., yi]           # (n_conc, n_chambers)
-
-        chambers = analysis.indep_vars.chamber_IDs        # (n_chambers,)
-        samples  = analysis.indep_vars.sample_IDs         # (n_chambers,)
-        sample_names = {cid: samples[i] for i, cid in enumerate(chambers)}
-        #mean_rates   = {cid: np.nanmean(slopes[:, i]) for i, cid in enumerate(chambers)}
-        mms_to_plot = {cid: mms[i] for i, cid in enumerate(chambers)}
-
-        def plot_rates_vs_conc(cid, ax):
-            idx = (chambers == cid)
-            x   = conc
-            y   = slopes[:, idx].flatten()
-            ax.scatter(x, y, alpha=0.7, label="current well")
-
-            if model_pred_data_name:
-                # show envelope of model fits for all wells with this sample
-                sample = sample_names[cid]
-                same_idxs = [i for i, s in enumerate(samples) if s == sample]
-                y_all = preds[:, same_idxs]               # (n_conc, n_same)
-                y_min = np.nanmin(y_all, axis=1)
-                y_max = np.nanmax(y_all, axis=1)
-                ax.fill_between(x, y_min, y_max, color="gray", alpha=0.3, label='other well fits')
-                # then overplot this chamber’s model fit
-                y_p = preds[:, idx].flatten()
-                ax.plot(x, y_p, color="red", label="current well fit")
-
-            if model_fit_name:
-                # extract this chamber's fit row
-                chamb_idx = np.where(chambers == cid)[0][0]
-                vals = fit_vals[chamb_idx]
-                txt = "".join(f"{nm}={v:.2f}\n" for nm,v in zip(fit_types, vals))
-                ax.text(0.05, 0.95, txt, transform=ax.transAxes,
-                        va="top", fontsize=8, bbox=dict(boxstyle="round", fc="white", alpha=0.7))
-            
-            if model_pred_data_name or model_fit_name:
-                ax.legend()
-            ax.set_title(f"{cid}: {sample_names[cid]}")
-            ax.set_xlabel("Concentration")
-            ax.set_ylabel("Initial Rate")
-            if x_log: ax.set_xscale("log")
-            if y_log: ax.set_yscale("log")
-            return ax
-
-        plot_chip(mms_to_plot, sample_names,
-                  graphing_function=plot_rates_vs_conc,
-                  title="Initial Rates vs Concentration")
-        
-    
-    def plot_ic50_chip(self,
-                    analysis_name: str,
-                    model_fit_name: str,
-                    model_pred_data_name: str = None,
-                    x_log: bool = False,
-                    y_log: bool = False):
-        """
-        Plot ic50 values, with inset initial rates vs substrate concentration for each chamber.
-        Optionally overlay fitted curve from `model_pred_data_name` and
-        annotate fit parameters from `model_fit_name`.
-        """
-        analysis: Data3D = self.get_run(analysis_name)
-        si = analysis.dep_var_type.index("slope")
-        slopes = analysis.dep_var[..., si]               # (n_conc, n_chambers)
-        conc   = analysis.indep_vars.concentration       # (n_conc,)
-
-        mf_fit: Data2D = self.get_run(model_fit_name)
-        fit_types = mf_fit.dep_var_type           # e.g. ["v_max","K_m","r_squared"]
-        fit_vals = mf_fit.dep_var                # shape (n_chamb, len(fit_types))
-
-        ic50s_idx = mf_fit.dep_var_type.index("ic50")
-        ic50s = mf_fit.dep_var[..., ic50s_idx]    # (n_chambers,)
-
-        if model_pred_data_name:
-            mf_pred: Data3D = self.get_run(model_pred_data_name)
-            yi = mf_pred.dep_var_type.index("y_pred")
-            preds = mf_pred.dep_var[..., yi]           # (n_conc, n_chambers)
-
-        chambers = analysis.indep_vars.chamber_IDs        # (n_chambers,)
-        samples  = analysis.indep_vars.sample_IDs         # (n_chambers,)
-        sample_names = {cid: samples[i] for i, cid in enumerate(chambers)}
-        #mean_rates   = {cid: np.nanmean(slopes[:, i]) for i, cid in enumerate(chambers)}
-        ic50s_to_plot = {cid: ic50s[i] for i, cid in enumerate(chambers)}
-
-        def plot_rates_vs_conc(cid, ax):
-            idx = (chambers == cid)
-            x   = conc
-            y   = slopes[:, idx].flatten()
-            ax.scatter(x, y, alpha=0.7, label="current well")
-
-            if model_pred_data_name:
-                # show envelope of model fits for all wells with this sample
-                sample = sample_names[cid]
-                same_idxs = [i for i, s in enumerate(samples) if s == sample]
-                y_all = preds[:, same_idxs]               # (n_conc, n_same)
-                y_min = np.nanmin(y_all, axis=1)
-                y_max = np.nanmax(y_all, axis=1)
-                ax.fill_between(x, y_min, y_max, color="gray", alpha=0.3, label='other well fits')
-                # then overplot this chamber’s model fit
-                y_p = preds[:, idx].flatten()
-                ax.plot(x, y_p, color="red", label="current well fit")
-
-            if model_fit_name:
-                # extract this chamber's fit row
-                chamb_idx = np.where(chambers == cid)[0][0]
-                vals = fit_vals[chamb_idx]
-                txt = "".join(f"{nm}={v:.2f}\n" for nm,v in zip(fit_types, vals))
-                ax.text(0.05, 0.95, txt, transform=ax.transAxes,
-                        va="top", fontsize=8, bbox=dict(boxstyle="round", fc="white", alpha=0.7))
-            
-            if model_pred_data_name or model_fit_name:
-                ax.legend()
-            ax.set_title(f"{cid}: {sample_names[cid]}")
-            ax.set_xlabel("Concentration")
-            ax.set_ylabel("Initial Rate")
-            if x_log: ax.set_xscale("log")
-            if y_log: ax.set_yscale("log")
-            return ax
-
-        plot_chip(ic50s_to_plot, sample_names,
-                  graphing_function=plot_rates_vs_conc,
-                  title="Initial Rates vs Concentration")
-
-    def plot_enzyme_concentration_chip(self, analysis_name: str, units:str, skip_start_timepoint: bool = True):
-        '''
-        Plot a full chip with raw data and fit initial rates.
-
-        Parameters:
-            analysis_name (str): the name of the analysis to be plotted.
-            experiment_name (str): the name of the experiment to be plotted.
-            skip_start_timepoint (bool): whether to skip the first timepoint in the analysis (Sometimes are unusually low). Default is True.
-
-        Returns:
-            None
-        '''
-        #plotting variable: We'll plot by enzyme concentration. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
-        analysis_data = self.get_run(analysis_name)     # Analysis data (to show slopes/intercepts)
-        
-        plotting_var = 'concentration'
-
-        # Verify we have the variable:
-        if plotting_var not in analysis_data.dep_var_type:
-            raise ValueError(f"'{plotting_var}' not found in analysis data. Available variables: {analysis_data.dep_vars_types}")
-        else:
-            plotting_var_index = analysis_data.dep_var_type.index(plotting_var)
-
-        concentration = analysis_data.dep_var[..., plotting_var_index]  # (n_chambers, n_conc, 1)
-       
-        #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
-        #chamber_names_dict = self._db_conn.get_chamber_name_dict()
-        chamber_names = analysis_data.indep_vars.chamber_IDs # (n_chambers,)
-        sample_names =  analysis_data.indep_vars.sample_IDs # (n_chambers,)
-
-        # Create dictionary mapping chamber_id -> sample_name:
-        sample_names_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            sample_names_dict[chamber_id] = sample_names[i]
-
-        # Create dictionary mapping chamber_id -> mean slopes:
-        conc_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            conc_dict[chamber_id] = np.nanmean(concentration[i])
-        
-        plot_chip(conc_dict, sample_names_dict, title=f'Enzyme Concentration ({units})')
-
-    def plot_mask_chip(self, mask_name: str):
-        '''
-        Plot a full chip with raw data and fit initial rates.
-
-        Parameters:
-            mask_name (str): the name of the mask to be plotted. (Data3D or Data2D)
-
-        Returns:
-            None
-        '''
-        #plotting variable: We'll plot by luminance. We need a dictionary mapping chamber id (e.g. '1,1') to the value to be plotted (e.g. slope)
-        mask_data = self.get_run(mask_name)     # Analysis data (to show slopes/intercepts)
-        
-        dtype = type(mask_data)
-        assert dtype in [Data3D, Data2D], "mask_data must be of type Data3D or Data2D."
-
-        mask_idx = mask_data.dep_var_type.index('mask')
-
-        # If we're using a data2D
-        mask = mask_data.dep_var[..., mask_idx] # (n_conc, n_chambers,)
-
-        # We want to plot the number of concentrations that pass the mask in each well.
-        # so, we'll sum across the concentration dimension, leaving an (n_chambers,) array
-
-        #passed_conc = np.sum(mask, axis=0)
-        #print(mask.shape)
-
-        #chamber_names: We'll provide the name of the sample in each chamber as well, in the same way:
-        chamber_names = mask_data.indep_vars.chamber_IDs # (n_chambers,)
-        sample_names =  mask_data.indep_vars.sample_IDs # (n_chambers,)
-
-        # Create dictionary mapping chamber_id -> sample_name:
-        sample_names_dict = {}
-        for i, chamber_id in enumerate(chamber_names):
-            sample_names_dict[chamber_id] = sample_names[i]
-
-        # Create dictionary mapping chamber_id -> mean slopes:
-        mask_sum = {}
-        for i, chamber_id in enumerate(chamber_names):
-            if dtype == Data3D:
-                mask_sum[chamber_id] = mask[:, i].sum()  # sum across concentrations for each chamber
-            elif dtype == Data2D:
-                mask_sum[chamber_id] = mask[i].sum()
-
-        #plotting function: We'll generate a subplot for each chamber, showing the raw data and the linear regression line.
-        # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
-        
-        plot_chip(mask_sum, sample_names_dict, title=f'# Concentrations that pass filter: {mask_name}')
-
     ### DATA EXPORT ###
-    def export_run_data_raw(self, run_name: str, output_dir: str = None):
+    def export_sample_vmax_data(self, run_name: str, output_dir: str = None, file_name: str = None):
         '''
-        Export per-chamber data to a CSV file, for Data2D objects.
+        Export per-sample vmax data to a CSV file, for Data2D objects.
+        This is an intermediate output step, before we divdie by [E] and output kcats.
+        Contains per-sample vmax, KM, replicate number (after filtering), and lists chambers IDs.
+
         Input:
             run_name (str): the name of the run to be exported.
             output_dir (str): the directory to save the CSV file. If None, uses current directory.
@@ -660,66 +143,681 @@ class HTBAMExperiment:
 
         if output_dir is None:
             output_dir = os.getcwd()
-        
-        # Create output directory if it doesn't exist
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
-        # Define the output file path
-        output_file = Path(output_dir) / f"{run_name}_data.csv"
 
-        chamber_IDs = run_data.indep_vars.chamber_IDs
-        sample_IDs = run_data.indep_vars.sample_IDs
-        
-        # Save the data to a CSV file
-        with open(output_file, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            header = ['chamber_ID', 'sample_ID'] + run_data.dep_var_type
-            writer.writerow(header)
-            for i in range(run_data.dep_var.shape[0]):
-                row = [chamber_IDs[i], sample_IDs[i]] + run_data.dep_var[i].tolist()
-                writer.writerow(row)
-        
-        print(f"Run data exported to {output_file}")
+        # Get sample names
+        sample_names = run_data.indep_vars.sample_IDs
+        unique_samples = np.unique(sample_names)
 
-    def export_run_data_processed(self, run_name: str, output_dir: str = None):
+        # Get units
+        vmax_units = f"{run_data.dep_var_units[0]:~}"
+        kM_units = f"{run_data.dep_var_units[1]:~}"
+
+        # New empty dataframe:
+        df = pd.DataFrame(columns=['sample', f'avg_v_max ({vmax_units})', f'avg_K_M ({kM_units})', 'avg_fit_R2', 'replicates', 'chamber_IDs'])
+
+        # Iterate over samples
+        for sample in unique_samples:
+            # Get indices of replicates for this sample
+            sample_indices = np.where(sample_names == sample)[0]
+
+            # Get rates for this sample
+            sample_vmax = run_data.dep_var[..., 0][sample_indices]
+            sample_kM = run_data.dep_var[..., 1][sample_indices]
+            sample_r2 = run_data.dep_var[..., 2][sample_indices]
+
+            # Get chamber IDs for this sample
+            sample_chamber_IDs = run_data.indep_vars.chamber_IDs[sample_indices]
+
+            # Get replicate number by counting non-nan values
+            replicate_number = np.count_nonzero(~np.isnan(sample_vmax))
+
+            nonnan_sample_chamber_IDs = sample_chamber_IDs[~np.isnan(sample_vmax)]
+
+            # Get average rate
+            if replicate_number > 0:
+                avg_vmax = np.nanmean(sample_vmax)
+                avg_kM = np.nanmean(sample_kM)
+                avg_r2 = np.nanmean(sample_r2)
+            else:
+                avg_vmax = np.nan
+                avg_kM = np.nan
+                avg_r2 = np.nan
+
+            # Append to dataframe
+            df = pd.concat([df, pd.DataFrame([{
+                'sample': sample,
+                f'avg_v_max ({vmax_units})': avg_vmax,
+                f'avg_K_M ({kM_units})': avg_kM,
+                'avg_fit_R2': avg_r2,
+                'replicates': replicate_number,
+                'chamber_IDs': nonnan_sample_chamber_IDs,
+            }])], ignore_index=True)
+
+        # Save to CSV
+        if file_name is None:
+            file_name = f'{run_name}_sample_rate_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+
+        print(f"Sample rate data exported to {output_dir}/{file_name}")
+
+
+    def export_chamber_vmax_data(self, run_name: str, enzyme_concentration_run_name: str, output_dir: str = None, file_name: str = None):
         '''
-        Export per-sample data to a CSV file, for Data2D objects.
+        Export per-chamber vmax data to a CSV file, for Data2D objects.
         Input:
             run_name (str): the name of the run to be exported.
+            enzyme_concentration_run_name (str): the name of the run with enzyme concentration data.
             output_dir (str): the directory to save the CSV file. If None, uses current directory.
+            file_name (str): the name of the file to save the CSV file. If None, uses run_name.
         Output:
             None
         '''
         run_data = self.get_run(run_name)
-        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
-        
-        sample_IDs = run_data.indep_vars.sample_IDs
-        chamber_IDs = run_data.indep_vars.chamber_IDs
 
-        # get the mean, std, and count for each value across each sample
-        sample_list = np.unique(sample_IDs)
-        sample_data = {sample: [] for sample in sample_list}
-        for i, sample in enumerate(sample_list):
-            sample_mask = (sample_IDs == sample)
-            sample_data[sample] = {
-                'chamber_IDs': chamber_IDs[sample_mask],
-                'mean': np.nanmean(run_data.dep_var[sample_mask], axis=0),
-                'std': np.nanstd(run_data.dep_var[sample_mask], axis=0),
-                'count': np.sum(~np.isnan(run_data.dep_var[sample_mask]), axis=0)
-            }
+        enzyme_concentration_data = self.get_run(enzyme_concentration_run_name)
+
+        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
 
         if output_dir is None:
             output_dir = os.getcwd()
-        # Create output directory if it doesn't exist
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        # Define the output file path
-        output_file = Path(output_dir) / f"{run_name}_processed_data.csv"
-        # Save the data to a CSV file
-        with open(output_file, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            header = ['sample_ID', 'chamber_IDs'] + run_data.dep_var_type
-            writer.writerow(header)
-            for sample, data in sample_data.items():
-                row = [sample, ','.join(data['chamber_IDs'].tolist())] + data['mean'].tolist()
-                writer.writerow(row)
-        print(f"Processed run data exported to {output_file}")
+
+        # Get sample names
+        chamber_names = run_data.indep_vars.chamber_IDs
+        sample_names = run_data.indep_vars.sample_IDs
+
+        # Get units
+        vmax_units = f"{run_data.dep_var_units[0]:~}"
+        kM_units = f"{run_data.dep_var_units[1]:~}"
+        E_units = f"{enzyme_concentration_data.dep_var_units[0]:~}"
+
+        # New empty dataframe:
+        df = pd.DataFrame(columns=['chamber', 'sample', f'v_max ({vmax_units})', f'K_M ({kM_units})', f'E_conc ({E_units})', 'fit_R2'])
+
+        # Iterate over samples
+        for chamber in chamber_names:
+            # Get indices of chambers for this sample
+            chamber_index = np.where(chamber_names == chamber)[0]
+
+            # Get rates for this sample
+            chamber_vmax = run_data.dep_var[..., 0][chamber_index][0]
+            chamber_kM = run_data.dep_var[..., 1][chamber_index][0]
+            chamber_r2 = run_data.dep_var[..., 2][chamber_index][0]
+
+            chamber_E_conc = enzyme_concentration_data.dep_var[..., 0][chamber_index][0]
+
+            # Append to dataframe
+            df = pd.concat([df, pd.DataFrame([{
+                'chamber': chamber,
+                'sample': sample_names[chamber_index],
+                f'v_max ({vmax_units})': chamber_vmax,
+                f'K_M ({kM_units})': chamber_kM,
+                f'E_conc ({E_units})': chamber_E_conc,
+                'fit_R2': chamber_r2,
+            }])], ignore_index=True)
+
+        # Save to CSV
+        if file_name is None:
+            file_name = f'{run_name}_chamber_rate_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+
+        print(f"Chamber rate data exported to {output_dir}/{file_name}")
+
+
+    
+
+    def export_MM_sample_data(self, run_name: str, enzyme_concentration_run_name: str, output_dir: str = None, file_name: str = None):
+        '''
+        Export per-sample kcat data to a CSV file.
+        Calculates kcat = vmax / [E] for each replicate, then averages.
+
+        Input:
+            run_name (str): the name of the run with vmax/Km data.
+            enzyme_concentration_run_name (str): the name of the run with enzyme concentration data.
+            output_dir (str): the directory to save the CSV file. If None, uses current directory.
+            file_name (str): the name of the file to save the CSV file. If None, uses run_name.
+        Output:
+            None
+        '''
+        run_data = self.get_run(run_name)
+        enzyme_concentration_data = self.get_run(enzyme_concentration_run_name)
+
+        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
+
+        if output_dir is None:
+            output_dir = os.getcwd()
+
+        # Get sample names
+        sample_names = run_data.indep_vars.sample_IDs
+        unique_samples = np.unique(sample_names)
+
+        # Get units
+        vmax_unit_obj = run_data.dep_var_units[0]
+        E_unit_obj = enzyme_concentration_data.dep_var_units[0]
+        kcat_unit_obj = run_data.dep_var_units[3]
+
+        vmax_units = f"{vmax_unit_obj:~}"
+        kM_units = f"{run_data.dep_var_units[1]:~}"
+        E_units = f"{E_unit_obj:~}"
+        kcat_units = f"{kcat_unit_obj:~}"
+
+        # New empty dataframe:
+        df = pd.DataFrame(columns=['sample', 
+                                   f'avg_k_cat ({kcat_units})', f'std_k_cat ({kcat_units})',
+                                   f'avg_K_M ({kM_units})', f'std_K_M ({kM_units})',
+                                   f'avg_E_conc ({E_units})', f'std_E_conc ({E_units})',
+                                   'avg_fit_R2', 'std_fit_R2',
+                                   'replicates', 'chamber_IDs'])
+
+        # Iterate over samples
+        for sample in unique_samples:
+            # Get indices of replicates for this sample
+            sample_indices = np.where(sample_names == sample)[0]
+
+            # Get rates for this sample
+            sample_vmax = run_data.dep_var[..., 0][sample_indices]
+            sample_kM = run_data.dep_var[..., 1][sample_indices]
+            sample_r2 = run_data.dep_var[..., 2][sample_indices]
+            sample_kcat = run_data.dep_var[..., 3][sample_indices]
+            
+            # Get enzyme concentrations (assuming alignment)
+            sample_E_conc = enzyme_concentration_data.dep_var[..., 0][sample_indices]
+
+            # Get chamber IDs for this sample
+            sample_chamber_IDs = run_data.indep_vars.chamber_IDs[sample_indices]
+
+            # Get replicate number by counting non-nan values in kcat
+            replicate_number = np.count_nonzero(~np.isnan(sample_kcat))
+
+            nonnan_sample_chamber_IDs = sample_chamber_IDs[~np.isnan(sample_kcat)]
+
+            # Get average rate
+            if replicate_number > 0:
+                avg_kcat = np.nanmean(sample_kcat)
+                std_kcat = np.nanstd(sample_kcat)
+                avg_kM = np.nanmean(sample_kM)
+                std_kM = np.nanstd(sample_kM)
+                avg_E_conc = np.nanmean(sample_E_conc)
+                std_E_conc = np.nanstd(sample_E_conc)
+                avg_r2 = np.nanmean(sample_r2)
+                std_r2 = np.nanstd(sample_r2)
+            else:
+                avg_kcat = np.nan
+                std_kcat = np.nan
+                avg_kM = np.nan
+                std_kM = np.nan
+                avg_E_conc = np.nan
+                std_E_conc = np.nan
+                avg_r2 = np.nan
+                std_r2 = np.nan
+
+            # Append to dataframe
+            df = pd.concat([df, pd.DataFrame([{
+                'sample': sample,
+                f'avg_k_cat ({kcat_units})': avg_kcat,
+                f'std_k_cat ({kcat_units})': std_kcat,
+                f'avg_K_M ({kM_units})': avg_kM,
+                f'std_K_M ({kM_units})': std_kM,
+                f'avg_E_conc ({E_units})': avg_E_conc,
+                f'std_E_conc ({E_units})': std_E_conc,
+                'avg_fit_R2': avg_r2,
+                'std_fit_R2': std_r2,
+                'replicates': replicate_number,
+                'chamber_IDs': nonnan_sample_chamber_IDs,
+            }])], ignore_index=True)
+
+        # Save to CSV
+        if file_name is None:
+            file_name = f'{run_name}_sample_kcat_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+
+        print(f"Sample kcat data exported to {output_dir}/{file_name}")
+
+
+    def export_MM_chamber_data(self, run_name: str, enzyme_concentration_run_name: str, output_dir: str = None, file_name: str = None):
+        '''
+        Export per-chamber kcat data to a CSV file.
+        Calculates kcat = vmax / [E].
+
+        Input:
+            run_name (str): the name of the run to be exported.
+            enzyme_concentration_run_name (str): the name of the run with enzyme concentration data.
+            output_dir (str): the directory to save the CSV file. If None, uses current directory.
+            file_name (str): the name of the file to save the CSV file. If None, uses run_name.
+        Output:
+            None
+        '''
+        run_data = self.get_run(run_name)
+        enzyme_concentration_data = self.get_run(enzyme_concentration_run_name)
+
+        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
+
+        if output_dir is None:
+            output_dir = os.getcwd()
+
+        # Get sample names
+        chamber_names = run_data.indep_vars.chamber_IDs
+        sample_names = run_data.indep_vars.sample_IDs
+
+        # Get units
+        vmax_unit_obj = run_data.dep_var_units[0]
+        E_unit_obj = enzyme_concentration_data.dep_var_units[0]
+        kcat_unit_obj = run_data.dep_var_units[3]
+
+        kcat_units = f"{kcat_unit_obj:~}"
+        kM_units = f"{run_data.dep_var_units[1]:~}"
+        E_units = f"{E_unit_obj:~}"
+
+        # New empty dataframe:
+        df = pd.DataFrame(columns=['chamber', 'sample', f'k_cat ({kcat_units})', f'K_M ({kM_units})', f'E_conc ({E_units})', 'fit_R2'])
+
+        # Iterate over chambers
+        for chamber in chamber_names:
+            # Get indices of chambers for this sample
+            chamber_index = np.where(chamber_names == chamber)[0]
+
+            # Get rates for this sample
+            chamber_vmax = run_data.dep_var[..., 0][chamber_index][0]
+            chamber_kM = run_data.dep_var[..., 1][chamber_index][0]
+            chamber_r2 = run_data.dep_var[..., 2][chamber_index][0]
+            chamber_kcat = run_data.dep_var[..., 3][chamber_index][0]
+
+            chamber_E_conc = enzyme_concentration_data.dep_var[..., 0][chamber_index][0]
+
+            # Append to dataframe
+            df = pd.concat([df, pd.DataFrame([{
+                'chamber': chamber,
+                'sample': sample_names[chamber_index][0],
+                f'k_cat ({kcat_units})': chamber_kcat,
+                f'K_M ({kM_units})': chamber_kM,
+                f'E_conc ({E_units})': chamber_E_conc,
+                'fit_R2': chamber_r2,
+            }])], ignore_index=True)
+
+        # Save to CSV
+        if file_name is None:
+            file_name = f'{run_name}_chamber_kcat_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+
+        print(f"Chamber kcat data exported to {output_dir}/{file_name}")
+
+    def export_mm_subplots_by_chamber(self,
+                           analysis_name: str,
+                           model_fit_name: str,
+                           export_path: str,
+                           dep_var_label: str = 'slope',
+                           model_pred_data_name: str = None,
+                           dpi: int = 100,
+                           x_log: bool = False,
+                           y_log: bool = False):
+        '''
+        Export a PDF of Michaelis-Menten subplots for each chamber in a 32x56 grid.
+        Plots a 95% confidence interval over the replicates for that chamber in gray.
+        
+        Input:
+            analysis_name (str): Name of the analysis run (Data3D).
+            model_fit_name (str): Name of the fit run (Data2D).
+            export_path (str): Path to save the generated PDF. Also can be a list of paths (if you want to save a PNG and PDF, for example)
+            dep_var_label (str): Label of the dependent variable to plot (default "slope").
+            model_pred_data_name (str): Optional name of prediction run (Data3D).
+            dpi (int): DPI for the exported image.
+            x_log (bool): If True, use log scale for Concentration.
+            y_log (bool): If True, use log scale for Initial Rate.
+        '''
+        # 1. Fetch Data
+        analysis: Data3D = self.get_run(analysis_name)
+        si = analysis.dep_var_type.index(dep_var_label)
+        slope_unit = analysis.dep_var_units[si]
+        slopes = analysis.dep_var[..., si] * slope_unit  # (n_conc, n_chambers)
+        conc   = analysis.indep_vars.concentration       # (n_conc,)
+
+        mf_fit: Data2D = self.get_run(model_fit_name)
+        fit_types = mf_fit.dep_var_type
+        fit_vals = mf_fit.dep_var
+        fit_units = mf_fit.dep_var_units
+        
+        preds = None
+        if model_pred_data_name:
+            mf_pred: Data3D = self.get_run(model_pred_data_name)
+            yi = mf_pred.dep_var_type.index("y_pred")
+            y_pred_unit = mf_pred.dep_var_units[yi]
+            preds = mf_pred.dep_var[..., yi] * y_pred_unit # (n_conc, n_chambers)
+
+        chambers = analysis.indep_vars.chamber_IDs
+        samples  = analysis.indep_vars.sample_IDs
+        sample_names = {cid: samples[i] for i, cid in enumerate(chambers)}
+        
+        # 2. Setup Figure
+        # Grid is 32 wide (x=1..32) and 56 high (y=1..56)
+        nrows, ncols = 56, 32
+        header_height = 2.5  # inches
+        total_height = 112 + header_height
+        fig, axes = plt.subplots(nrows, ncols, figsize=(64, total_height))
+        
+        # Add description text at the top
+        description_text = (
+            "Michaelis-Menten Fit Subplots by Chamber\n\n"
+            "This PDF displays the Michaelis-Menten fit subplots for each chamber across the 32x56 grid.\n"
+            "• Blue Circle Markers: Represent the experimental data points (slopes) at each substrate concentration.\n"
+            "• Solid Red Line: Represents the best-fit Michaelis-Menten curve calculated for that specific chamber.\n"
+            "• Gray Shaded Envelope: Represents the 95% confidence interval of the fit curves across all replicates of the same sample.\n"
+            "• Inset Text Box: Lists the calculated fit parameters (e.g., $k_{cat}$, $K_M$) with their corresponding values and units."
+        )
+        
+        fig.text(0.5, 1.0 - (0.5 / total_height), description_text,
+                 ha='center', va='top', fontsize=10, multialignment='left',
+                 bbox=dict(boxstyle="round,pad=0.8", fc="white", ec="silver", lw=1))
+        
+        # 3. Iterate and Plot
+        # axes is (nrows, ncols)
+        tqdm.write("Plotting chambers...")
+        for y in tqdm(range(nrows)):
+            for x in range(ncols):
+                ax = axes[y, x]
+                # Chamber ID is "x,y" (1-based)
+                # In plot_chip, x is col index+1, y is row index+1
+                cid = f"{x+1},{y+1}"
+                
+                if cid not in sample_names:
+                    ax.axis('off')
+                    continue
+                
+                # Check if we found the chamber in the data
+                idx = (chambers == cid)
+                if not np.any(idx):
+                     ax.axis('off')
+                     continue
+
+                # Plot content
+                x_data = conc
+                y_data = slopes[:, idx].flatten()
+
+                # Robust unit handling for plotting
+                if hasattr(x_data, 'magnitude'): x_data = x_data.magnitude
+                if hasattr(y_data, 'magnitude'): y_data = y_data.magnitude
+                
+                chamb_idx_arr = np.where(chambers == cid)[0]
+                chamb_idx = chamb_idx_arr[0]
+                vals = fit_vals[chamb_idx]
+
+                ax.set_title(f"{cid}: {sample_names[cid]}", fontsize=8)
+                ax.set_xlabel(f"Conc ({conc.units:~})", fontsize=6)
+                ax.set_ylabel(f"Rate ({slopes.units:~})", fontsize=6)
+
+                if preds is None or np.isnan(vals).all():
+                    continue
+
+                ax.scatter(x_data, y_data, alpha=0.7, s=15, label='data') 
+
+                # CI Logic
+                sample = sample_names[cid]
+                same_idxs = [i for i, s in enumerate(samples) if s == sample]
+                y_all = preds[:, same_idxs]
+                
+                y_min = np.nanpercentile(y_all, 2.5, axis=1)
+                y_max = np.nanpercentile(y_all, 97.5, axis=1)
+                y_p = preds[:, idx].flatten()
+
+                # Robust unit handling for predictions
+                if hasattr(y_p, 'magnitude'): y_p = y_p.magnitude
+                if hasattr(y_min, 'magnitude'): y_min = y_min.magnitude
+                if hasattr(y_max, 'magnitude'): y_max = y_max.magnitude
+                
+                ax.plot(x_data, y_p, color='red', linewidth=1, label='fit')
+                ax.fill_between(x_data, y_min, y_max, color='gray', alpha=0.3, label='95% CI')
+                
+                # Fit params text
+                # We need to find the index of this chamber in the fit data
+                chamb_idx_arr = np.where(chambers == cid)[0]
+                if len(chamb_idx_arr) > 0:
+                    chamb_idx = chamb_idx_arr[0]
+                    vals = fit_vals[chamb_idx]
+                    txt = "\n".join(f"{nm}={v:.2f} {u:~}" for nm,v,u in zip(fit_types, vals, fit_units))
+                    ax.text(0.05, 0.95, txt, transform=ax.transAxes,
+                            va='top', fontsize=6, bbox=dict(boxstyle="round", fc="white", alpha=0.6))
+
+                ax.set_title(f"{cid}: {sample_names[cid]}", fontsize=8)
+                ax.set_xlabel(f"Conc ({conc.units:~})", fontsize=6)
+                ax.set_ylabel(f"Rate ({slopes.units:~})", fontsize=6)
+                
+                if x_log: ax.set_xscale("log")
+                if y_log: ax.set_yscale("log")
+                
+                ax.tick_params(axis='both', which='major', labelsize=6)
+                
+        top_fraction = 1.0 - (header_height / total_height)
+        plt.tight_layout(rect=[0, 0, 1, top_fraction])
+        # Ensure directory exists
+        tqdm.write(f"Exporting MM subplots to {export_path}")
+
+        if type(export_path) == str:
+            Path(export_path).parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(export_path, dpi=dpi)
+        elif type(export_path) == list:
+            for path in export_path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(path, dpi=dpi)
+        plt.close(fig)
+        print(f"Exported MM subplots to {export_path}")
+
+
+    def export_mm_subplots_by_sample(self,
+                           analysis_name: str,
+                           model_fit_name: str,
+                           export_path: str,
+                           dep_var_label: str = 'slope',
+                           model_pred_data_name: str = None,
+                           hide_excluded_samples: bool = False,
+                           dpi: int = 100,
+                           aspect_ratio: float = 1.5,
+                           x_log: bool = False,
+                           y_log: bool = False):
+        '''
+        Export a PDF of Michaelis-Menten subplots for each SAMPLE with replicates.
+        
+        We'll use the following process:
+        1. For each sample, fetch the replicates.
+        2. Plot the average rates / [E] vs concentration with 1 std dev error bars for replicates.
+        3. Get the stdev of the kcats. Plot an envelope of the fit lines with +-1 stdev kcat (with mean KM).
+        
+        Input:
+            analysis_name (str): Name of the analysis run (Data3D).
+            model_fit_name (str): Name of the fit run (Data2D).
+            export_path (str): Path to save the generated PDF. Can also be a list of paths (if you want to save a PNG and PDF, for example)
+            model_pred_data_name (str): Optional name of prediction run (Data3D).
+            hide_excluded_samples (bool): If True, exclude samples with missing replicates.
+            dpi (int): DPI for the exported image.
+            x_log (bool): If True, use log scale for Concentration.
+            y_log (bool): If True, use log scale for Initial Rate.
+        '''
+        # 1. Fetch Data
+        analysis: Data3D = self.get_run(analysis_name)
+        si = analysis.dep_var_type.index(dep_var_label)
+        slope_unit = analysis.dep_var_units[si]
+        slopes = analysis.dep_var[..., si] * slope_unit  # (n_conc, n_chambers)
+        conc   = analysis.indep_vars.concentration       # (n_conc,)
+
+        mf_fit: Data2D = self.get_run(model_fit_name)
+        fit_types = mf_fit.dep_var_type
+        fit_vals = mf_fit.dep_var
+        fit_units = mf_fit.dep_var_units
+        
+        # Get kcat and km indices and data
+        kcat_idx = mf_fit.dep_var_type.index("kcat")
+        all_kcats = mf_fit.dep_var[..., kcat_idx] * fit_units[kcat_idx]   # (n_chambers,)
+        kM_idx = mf_fit.dep_var_type.index("K_m")
+        all_kMs = mf_fit.dep_var[..., kM_idx] * fit_units[kM_idx]   # (n_chambers,)
+
+        chambers = analysis.indep_vars.chamber_IDs
+        samples  = analysis.indep_vars.sample_IDs
+        
+        # Group chambers by sample
+        unique_samples = np.unique(samples)
+        sample_to_chambers = {s: [] for s in unique_samples}
+        for i, s in enumerate(samples):
+            sample_to_chambers[s].append(i) # Store indices
+            
+        # 2. Setup Figure
+        # Determine grid size based on number of samples
+        n_samples = len(unique_samples)
+        
+        # Let's try to make a somewhat square grid, or use the standard 8x12 plate layout if it matches
+        ncols = 3
+        nrows = int(np.ceil(n_samples / ncols))
+        
+        # Reserve height at the top for description text
+        header_height = 2.5  # inches
+        plot_height = (4/aspect_ratio)*nrows
+        total_height = plot_height + header_height
+        
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, total_height), squeeze=False)
+        # Set aspect ratio to 1.25:1, which allows for 3x5 plots on a 8.5/11 page:
+        for ax in axes.flatten():
+            ax.set_box_aspect(1/aspect_ratio)   
+            
+        # Add description text at the top
+        description_text = (
+            "Michaelis-Menten Fit Subplots by Sample\n\n"
+            "This PDF displays the Michaelis-Menten fit subplots for each sample across its replicates.\n"
+            "• Blue Circle Markers & Error Bars: Represent the mean initial rate normalized by enzyme concentration ($V_0 / [E]$) across replicates\n"
+            "  at each substrate concentration ($[S]$), with error bars indicating $\\pm 1$ standard deviation.\n"
+            "• Solid Blue Line: Represents the best-fit Michaelis-Menten curve calculated using the mean $k_{cat}$ and mean $K_M$ values\n"
+            "  across replicates.\n"
+            "• Light Blue Shaded Envelope: Represents the $\\pm 1$ standard deviation interval of the fit curves, generated by varying $k_{cat}$\n"
+            "  by $\\pm 1$ standard deviation ($k_{cat} \\pm 1 \\sigma$) while keeping $K_M$ at its mean value.\n"
+            "• Text Annotation: Shows the calculated average $k_{cat}$ and $K_M$ values along with their standard deviations\n"
+            "  across all valid replicates."
+        )
+        
+        fig.text(0.5, 1.0 - (0.5 / total_height), description_text,
+                 ha='center', va='top', fontsize=10, multialignment='left',
+                 bbox=dict(boxstyle="round,pad=0.8", fc="white", ec="silver", lw=1))
+        
+        tqdm.write("Plotting samples...")
+        
+        # 3. Iterate and Plot
+        skipped_samples = []
+        for i, sample in enumerate(tqdm(unique_samples)):
+            i = i - len(skipped_samples)
+            row = i // ncols
+            col = i % ncols
+            ax = axes[row, col]
+            
+            indices = sample_to_chambers[sample] # indices of replicates in 'slopes' and 'chambers' arrays
+            
+            # --- Aggregating Rates ---
+            # slopes is (n_conc, n_chambers)
+            # we want slopes[:, indices] -> (n_conc, n_replicates)
+            replicate_rates = slopes[:, indices] 
+            
+            mean_rates = np.nanmean(replicate_rates, axis=1) # (n_conc,)
+            std_rates = np.nanstd(replicate_rates, axis=1)   # (n_conc,)
+            
+            # Plot error bars
+            # errorbar doesn't handle quantities with units well in older mpl versions, ensuring magnitude
+            if hasattr(mean_rates, 'magnitude'):
+                 y = mean_rates.magnitude
+                 yerr = std_rates.magnitude
+                 x = conc.magnitude
+            else:
+                 y = mean_rates
+                 yerr = std_rates
+                 x = conc
+
+            # --- Aggregating Fit Parameters ---
+            sample_kcats = all_kcats[indices]
+            sample_kMs = all_kMs[indices]
+            
+            mean_kcat = np.nanmean(sample_kcats)
+            mean_km = np.nanmean(sample_kMs)
+            
+            kcat_stdev = np.nanstd(sample_kcats)
+            km_stdev = np.nanstd(sample_kMs)
+            
+            kcat_up = mean_kcat + kcat_stdev
+            kcat_down = mean_kcat - kcat_stdev
+
+            if hide_excluded_samples:
+                if np.isnan(mean_kcat.magnitude):
+                    print(f"Sample {sample} has no (non-NaN) replicates. Skipping.")
+                    skipped_samples.append(sample)
+                    continue
+
+            # Plotting rates
+            ax.errorbar(x, y, yerr=yerr, fmt='o', capsize=3, label='mean rate', color='blue')
+            
+            # --- Generating Prediction Lines ---
+            # mm_model(S, Vmax, Km) -> here we treat Vmax as kcat because likely normalized
+            # But wait, mm_model usually expects Vmax. 
+            # If the user plotted "kcat" in plot_MM_div_E_chip, it implies 'slopes' are normalized.
+            # So mm_model(conc, kcat, Km) should return normalized rates.
+            
+            pred_conc_range = np.linspace(conc.min(), conc.max(), 100)
+            pred_y_mean = mm_model(pred_conc_range, mean_kcat, mean_km)
+            pred_y_up = mm_model(pred_conc_range, kcat_up, mean_km)
+            pred_y_down = mm_model(pred_conc_range, kcat_down, mean_km)
+            
+            # Ensure magnitude for plotting
+            if hasattr(pred_y_mean, 'magnitude'):
+                 py_mean = pred_y_mean.magnitude
+                 py_up = pred_y_up.magnitude
+                 py_down = pred_y_down.magnitude
+            else:
+                 py_mean = pred_y_mean
+                 py_up = pred_y_up
+                 py_down = pred_y_down
+            
+            ax.plot(pred_conc_range, py_mean, color="blue", label="mean fit")
+            ax.fill_between(pred_conc_range, py_down, py_up, color="blue", alpha=0.2, label=r'$k_{cat} \pm 1 \sigma$')
+            
+            # Annotate
+            if hasattr(mean_kcat, 'units'):
+                kcat_str = f"{mean_kcat.magnitude:.2f} ± {kcat_stdev.magnitude:.2f} {mean_kcat.units:~}"
+            else:
+                kcat_str = f"{mean_kcat:.2f} ± {kcat_stdev:.2f}"
+                
+            if hasattr(mean_km, 'units'):
+                km_str = f"{mean_km.magnitude:.2f} ± {km_stdev.magnitude:.2f} {mean_km.units:~}"
+            else:
+                km_str = f"{mean_km:.2f} ± {km_stdev:.2f}"
+            
+            ax.text(0.95, 0.05, 
+                    f"$\\overline{{k_{{cat}}}}$ = {mean_kcat.magnitude:.2f} ± {kcat_stdev:.2f~}\n"
+                    f"$\\overline{{K_{{M}}}}$ = {mean_km.magnitude:.2f} ± {km_stdev:.2f~}", 
+                    transform=ax.transAxes,
+                    ha="right", va="bottom", fontsize=8)
+                    #bbox=dict(boxstyle="round", fc="white", alpha=0.7))
+
+            ax.set_title(f"{sample}", fontsize=10)
+            
+            # Labels
+            conc_unit = f"({conc.units:~})" if hasattr(conc, 'units') else ""
+            rate_unit = f"({slopes.units:~})" if hasattr(slopes, 'units') else ""
+            
+            ax.set_xlabel(f"$[S]$ {conc_unit}", fontsize=8)
+            ax.set_ylabel(f"$V_0/[E]$ {rate_unit}", fontsize=8)
+            
+            if x_log: ax.set_xscale("log")
+            if y_log: ax.set_yscale("log")
+            
+            ax.tick_params(axis='both', which='major', labelsize=8)
+
+        # Hide empty axes
+        for j in range(i + 1, nrows * ncols):
+            row = j // ncols
+            col = j % ncols
+            axes[row, col].axis('off')
+
+        top_fraction = 1.0 - (header_height / total_height)
+        plt.tight_layout(rect=[0, 0, 1, top_fraction])
+        tqdm.write(f"Exporting MM subplots by sample to {export_path}")
+        
+        if type(export_path) == str:
+            Path(export_path).parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(export_path, dpi=dpi)
+        elif type(export_path) == list:
+            for path in export_path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(path, dpi=dpi)
+        
+        plt.close(fig)
+        print(f"Exported MM subplots by sample to {export_path}")

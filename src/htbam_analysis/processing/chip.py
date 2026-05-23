@@ -1,28 +1,19 @@
-# title             : chip.py
-# description       :
-# authors           : Daniel Mokhtari
-# credits           : Craig Markin
-# date              : 20180615
-# version update    : 20180615
-# version           : 0.1.0
-# usage             : With permission from DM
-# python_version    : 3.6
-
-# General Python
 import gc
 import warnings
 from copy import deepcopy
 from collections import namedtuple
-from htbam_analysis.processing import experiment
+# from htbam_analysis.processing import experiment
 
 import numpy as np
 import numpy.ma as ma
 from tqdm import tqdm
 import pandas as pd
 
+from typing import List
+import multiprocessing
+
 import cv2
 import skimage
-from skimage import io
 
 
 class ChipImage:
@@ -30,7 +21,7 @@ class ChipImage:
     # stampWidth = 60
 
     def __init__(
-        self, device, raster, ids, corners, pinlist, channel, exposure, attrs=None
+        self, device, raster, corners, attrs=None
     ):
         """
         Constructor for a ChipImage object. A ChipImage represents a single rastered chip image
@@ -53,16 +44,18 @@ class ChipImage:
         """
 
         self.device = device
+    
         self.data_ref = raster  # reference
-        self.ids = ids
+        # self.ids = ids
         self.stampWidth = ChipImage.stampWidth
-        self.pinlist = pinlist
+        self.pinlist = device.pinlist
         self.attrs = attrs
         self.stamps = None
         self.centers = []
 
         if not isinstance(corners, type(namedtuple)):
-            self.corners = experiment.Device._corners(corners)
+            chipCorners = namedtuple("Corners", ["ul", "ur", "bl", "br"])
+            self.corners = chipCorners(*corners)
         else:
             self.corners = corners
 
@@ -83,7 +76,8 @@ class ChipImage:
 
         if altCorners:
             if not isinstance(altCorners, namedtuple):
-                corners = experiment.Device._corners(altCorners)
+                chipCorners = namedtuple("Corners", ["ul", "ur", "bl", "br"])
+                corners = chipCorners(*altCorners)
             else:
                 corners = altCorners
             self.centers = self.quadrilateralInterp(altCorners, self.device.dims)
@@ -136,7 +130,7 @@ class ChipImage:
             [[x, y] for x in range(0, xdim) for y in range(0, ydim)]
         ).reshape(xdim, ydim, 2)
 
-        a = np.empty((xdim, ydim), dtype=np.object)
+        a = np.empty((xdim, ydim), dtype=object)
         for x, y in indices.reshape((xdim * ydim, 2)):
             stamp = imgstamps[x, y]
             center = self.centers[x, y]
@@ -171,7 +165,8 @@ class ChipImage:
             return np.stack((x, y), axis=1)
 
         if not isinstance(corners, type(namedtuple)):
-            corners = experiment.Device._corners(corners)
+            chipCorners = namedtuple("Corners", ["ul", "ur", "bl", "br"])
+            corners = chipCorners(*corners)
 
         left = interp(corners.ul, corners.bl, dims.y)
         right = interp(corners.ur, corners.br, dims.y)
@@ -377,14 +372,15 @@ class ChipImage:
             os.makedirs(target.parent, exist_ok=True)
             skimage.io.imsave(target, s)
 
-    def __str__(self):
-        return "IDs: {}, Device: {}, ImageReference: {}".format(
-            self.ids, str((self.device.setup, self.device.dname)), self.data_ref
-        )
+    # def __str__(self):
+    #     return "IDs: {}, Device: {}, ImageReference: {}".format(
+    #         self.ids, str((self.device.setup, self.device.dname)), self.data_ref
+    #     )
 
 
 class Stamp:
-    chamberrad = 16
+    # chamberrad = 16
+    chamberrad = 32
     outerchamberbound = 5
     circlePara1Index = 50
     circlePara2Index = 40
@@ -540,7 +536,7 @@ class Stamp:
         imageCopy = img.copy()
         mask = np.zeros(imageCopy.shape)
         cv2.circle(mask, center, radius, 1, -1)  # Warning: MODIFIES mask IN PLACE!!
-        mask = mask.astype(np.bool)
+        mask = mask.astype(bool)
 
         insert = np.where(mask)
         intensities = img[insert]
@@ -580,7 +576,7 @@ class Stamp:
                 warnings.simplefilter(
                     "ignore"
                 )  # Will throw warning due to precision loss
-                cimg = skimage.img_as_ubyte(img, force_copy=True)
+                cimg = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
             # searchRadii
             minRad = chamberRadius
