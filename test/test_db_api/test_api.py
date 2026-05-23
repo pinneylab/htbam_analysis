@@ -1,9 +1,11 @@
 import unittest
+import numpy as np
 from htbam_analysis.db_api import htbam_db_api
 from htbam_analysis.db_api.units import units
+from htbam_analysis.db_api.data import Data4D, Data2D
 
 
-class TestIO(unittest.TestCase):
+class TestLocalHtbamDBAPI(unittest.TestCase):
 
     def setUp(self) -> None:
         self.db_api = htbam_db_api.LocalHtbamDBAPI(
@@ -11,31 +13,53 @@ class TestIO(unittest.TestCase):
             standard_name="Mpro_std",
             standard_substrate="IDK",
             standard_units=units.uM,
+            standard_concentration_col="concentration_uM",
             kinetic_data_path="./test/test_db_api/test_data/mpro_kinetic_test.csv",
             kinetic_name="Mpro_kin",
             kinetic_substrate="N4L",
             kinetic_units=units.uM,
+            kinetic_concentration_col="series_index",
             time_units=units.s,
+            button_quant_data_path="./test/test_data/button_quant/button_quant.csv",
             )
     
-    def test_init(self):
-        self.assertListEqual(['chamber_metadata', 'runs', 'button_quant'], list(self.db_api._json_dict.keys()))
-        self.assertListEqual(['standard_0', 'kinetic_0'], list(self.db_api._json_dict['runs'].keys()))
-   
-    def test_get_run_assay_data(self):
-        run_data = self.db_api.get_run_assay_data('standard_0')
-        self.assertEqual(len(run_data), 4)
-        chamber_idxs, luminance_data, conc_data, time_data = run_data
-        self.assertListEqual(chamber_idxs.tolist(),["1,1", "1,2", "1,3"])
-        self.assertEqual(conc_data.shape, (7,))
-        self.assertEqual(time_data.shape, (1,7))
-        self.assertEqual(luminance_data.shape, (1, len(chamber_idxs), len(conc_data)))
+    def test_get_run_names(self):
+        run_names = self.db_api.get_run_names()
+        self.assertListEqual(['Mpro_std', 'Mpro_kin', 'button_quant'], list(run_names))
 
-    def test_chamber_name_dicts(self):
-        self.assertDictEqual({'1,1': 1224, '1,2': 1217, '1,3': 1329}, self.db_api.get_chamber_name_dict())
-        self.assertDictEqual({1224: ['1,1'], 1217: ['1,2'], 1329: ['1,3']}, self.db_api.get_chamber_name_to_id_dict())
+    def test_get_run_standard(self):
+        std_run = self.db_api.get_run('Mpro_std')
+        self.assertIsInstance(std_run, Data4D)
+        self.assertListEqual(['luminance'], std_run.dep_var_type)
         
-    
+        # Check chambers
+        chambers = std_run.indep_vars.chamber_IDs
+        self.assertIn("1,1", chambers)
+        self.assertIn("1,2", chambers)
+        self.assertIn("1,3", chambers)
+
+        # Check concentrations
+        concs = std_run.indep_vars.concentration.magnitude
+        np.testing.assert_allclose(concs, [0.0, 0.76, 1.53, 3.06, 6.13, 12.5, 25.0])
+
+    def test_get_run_kinetics(self):
+        kin_run = self.db_api.get_run('Mpro_kin')
+        self.assertIsInstance(kin_run, Data4D)
+        self.assertListEqual(['luminance'], kin_run.dep_var_type)
+        
+        chambers = kin_run.indep_vars.chamber_IDs
+        self.assertIn("1,1", chambers)
+        
+        # Check that we parsed raw concentration strings into floats: e.g. 0.01, 0.81, 3.27 etc.
+        concs = kin_run.indep_vars.concentration.magnitude
+        self.assertGreater(len(concs), 0)
+        self.assertIn(1.01, np.round(concs, 2))
+
+    def test_get_run_button_quant(self):
+        bq_run = self.db_api.get_run('button_quant')
+        self.assertIsInstance(bq_run, Data2D)
+        self.assertListEqual(['luminance'], bq_run.dep_var_type)
+
 
 if __name__ == '__main__':
     unittest.main()
