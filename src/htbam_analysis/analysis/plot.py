@@ -29,13 +29,14 @@ from htbam_analysis.db_api.data import Data4D, Data3D, Data2D
 # Plotting
 import seaborn as sns
 
-def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
+def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None, colorbar_title=None):
     ''' This function creates a Dash visualization of a chip, based on a certain Run (run_name)
         Inputs:
             plotting_var: a dictionary mapping chamber_id to the variable to be plotted for that chamber
             chamber_names: a dictionary mapping chamber_id to the name of the sample in the chamber (e.g. '1,1': ecADK_XYZ')
             graphing_function: a function that takes in a single chamber_id (e.g. '1,1') and matplotlib axis and returns the axis object after plotting.
             title: a string to be used as the title of the plot
+            colorbar_title: an optional string to label the colorbar.
         TODO: make all the variables stored in Dash properly...
     '''
 
@@ -71,6 +72,14 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
     # To discard outliers that mess with the data, we're using the 5th and 95th percentiles.
     zmin, zmax = np.nanpercentile(img_array, [5, 95])
 
+    if colorbar_title is None:
+        cbar_title_str = units
+    else:
+        if units:
+            cbar_title_str = f"{colorbar_title} ({units})"
+        else:
+            cbar_title_str = colorbar_title
+
     heatmap = go.Heatmap(
         x=x_vals,
         y=y_vals,
@@ -78,7 +87,7 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None):
         zmin=zmin,
         zmax=zmax,
         colorscale='Viridis',
-        colorbar=dict(title=units),
+        colorbar=dict(title=cbar_title_str),
         hovertemplate='x=%{x}<br>y=%{y}<br>z=%{z} ' + units +'<extra></extra>'
     )
     
@@ -311,7 +320,7 @@ def plot_chip_by_variable(experiment: 'HTBAMExperiment', analysis_name: str, var
         ax.set_ylabel('Count')
         return ax
 
-    plot_chip(concentration_dict, sample_names_dict, title=f'Analysis: {plotting_var}', graphing_function=plot_chamber_variable)
+    plot_chip(concentration_dict, sample_names_dict, title=f'Analysis: {plotting_var}', graphing_function=plot_chamber_variable, colorbar_title=plotting_var)
 
 def plot_standard_curve_chip(experiment: 'HTBAMExperiment', analysis_name: str, experiment_name: str):
     '''
@@ -385,7 +394,7 @@ def plot_standard_curve_chip(experiment: 'HTBAMExperiment', analysis_name: str, 
             ax.legend([f'Current Chamber Slope: {slopes_dict[chamber_id].magnitude:.2f} {slope_unit:~}'])
         return ax
     
-    plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope')
+    plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_slopes, title='Standard Curve: Slope', colorbar_title='Slope')
 
 def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, experiment_name: str, skip_start_timepoint: bool = True,
                             fit_points_mask: str = None,
@@ -505,7 +514,7 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
 
         return ax
     
-    plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_initial_rates, title='Kinetics: Initial Rates')
+    plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_initial_rates, title='Kinetics: Initial Rates', colorbar_title='Initial Rate')
 
 def plot_product_vs_time_chip(experiment: 'HTBAMExperiment', experiment_name: str, skip_start_timepoint: bool = True,
                              fit_points_mask: str = None,
@@ -587,7 +596,7 @@ def plot_product_vs_time_chip(experiment: 'HTBAMExperiment', experiment_name: st
         ax.legend([f'{substrate_conc[i]:~}' for i in range(len(substrate_conc))])
         return ax
 
-    plot_chip(product_dict, sample_names_dict, graphing_function=plot_chamber_product, title='Kinetics: Product vs Time')
+    plot_chip(product_dict, sample_names_dict, graphing_function=plot_chamber_product, title='Kinetics: Product vs Time', colorbar_title='Max Product Concentration')
 
 def plot_initial_rates_vs_concentration_chip(experiment: 'HTBAMExperiment',
                                              analysis_name: str,
@@ -652,7 +661,8 @@ def plot_initial_rates_vs_concentration_chip(experiment: 'HTBAMExperiment',
 
     plot_chip(mean_rates, sample_names,
               graphing_function=plot_rates_vs_conc,
-              title="Initial Rates vs Concentration")
+              title="Initial Rates vs Concentration",
+              colorbar_title="Mean Initial Rate")
 
 def plot_MM_chip(experiment: 'HTBAMExperiment',
                 analysis_name: str,
@@ -731,7 +741,8 @@ def plot_MM_chip(experiment: 'HTBAMExperiment',
 
     plot_chip(mms_to_plot, sample_names,
               graphing_function=plot_rates_vs_conc,
-              title="Initial Rates vs Concentration")   
+              title="Initial Rates vs Concentration",
+              colorbar_title="V_max")   
 
 def plot_MM_div_E_chip(experiment: 'HTBAMExperiment',
                 analysis_name: str,
@@ -835,7 +846,8 @@ def plot_MM_div_E_chip(experiment: 'HTBAMExperiment',
 
     plot_chip(kcats_to_plot, sample_names,
               graphing_function=plot_rates_vs_conc,
-              title="V_0/[E] vs [S]")       
+              title="V_0/[E] vs [S]",
+              colorbar_title="k_cat")       
 
 def plot_ic50_chip(experiment: 'HTBAMExperiment',
                 analysis_name: str,
@@ -914,7 +926,8 @@ def plot_ic50_chip(experiment: 'HTBAMExperiment',
 
     plot_chip(ic50s_to_plot, sample_names,
               graphing_function=plot_rates_vs_conc,
-              title="Initial Rates vs Concentration")
+              title="Initial Rates vs Concentration",
+              colorbar_title="IC50")
 
 def plot_enzyme_concentration_chip(experiment: 'HTBAMExperiment', analysis_name: str, skip_start_timepoint: bool = True):
     '''
@@ -975,7 +988,8 @@ def plot_enzyme_concentration_chip(experiment: 'HTBAMExperiment', analysis_name:
     
     plot_chip(conc_dict, sample_names_dict, 
             graphing_function=graphing_function,
-            title=f'Enzyme Concentration')
+            title=f'Enzyme Concentration',
+            colorbar_title='Concentration')
 
 def plot_mask_chip(experiment: 'HTBAMExperiment', mask_name: str):
     '''
@@ -1025,7 +1039,7 @@ def plot_mask_chip(experiment: 'HTBAMExperiment', mask_name: str):
     #plotting function: We'll generate a subplot for each chamber, showing the raw data and the linear regression line.
     # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
     
-    plot_chip(mask_sum, sample_names_dict, title=f'# Concentrations that pass filter: {mask_name}')
+    plot_chip(mask_sum, sample_names_dict, title=f'# Concentrations that pass filter: {mask_name}', colorbar_title='Count')
 
 def plot_chip_by_variable(experiment: 'HTBAMExperiment', analysis_name: str, variable: str):
     '''
@@ -1077,4 +1091,4 @@ def plot_chip_by_variable(experiment: 'HTBAMExperiment', analysis_name: str, var
     #plotting function: We'll generate a subplot for each chamber, showing the raw data and the linear regression line.
     # to do this, we make a function that takes in the chamber_id and the axis object, and returns the axis object after plotting. Do NOT plot.show() in this function.
     
-    plot_chip(mask_sum, sample_names_dict, title=f'{variable}')
+    plot_chip(mask_sum, sample_names_dict, title=f'{variable}', colorbar_title=variable)

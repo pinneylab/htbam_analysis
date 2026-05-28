@@ -27,8 +27,12 @@ def _get_grid_angle(image_path: Path) -> float:
     
     # Normalize the crop to handle different exposures
     crop = crop.astype(float)
-    if crop.max() > crop.min():
-        crop = (crop - crop.min()) / (crop.max() - crop.min())
+    ptp = crop.max() - crop.min()
+    
+    if ptp < 10:
+        raise ValueError("Image lacks sufficient contrast/features (basically flat)")
+        
+    crop = (crop - crop.min()) / ptp
         
     # Edge detection
     edges = filters.sobel(crop)
@@ -38,6 +42,12 @@ def _get_grid_angle(image_path: Path) -> float:
     sinogram = transform.radon(edges, theta=angles, circle=True)
     
     variances = np.var(sinogram, axis=0)
+    
+    # Check if a clear dominant grid line angle was found
+    peak_prominence = np.max(variances) / (np.median(variances) + 1e-8)
+    if peak_prominence < 1.1:
+        raise ValueError(f"No distinct grid angle detected (prominence: {peak_prominence:.3f})")
+        
     best_angle = angles[np.argmax(variances)]
     
     # Return negative angle because of rotation sign convention
@@ -131,25 +141,27 @@ class ImageStitcher:
                 (df['raster_col_index'] > 0) & (df['raster_col_index'] < width - 1) &
                 (df['raster_row_index'] > 0) & (df['raster_row_index'] < height - 1)
             ]
-            if len(center_df) >= max_samples:
-                sample_images = center_df['image_path'].sample(n=max_samples, random_state=42).to_list()
+            if not center_df.empty:
+                # Use all center images, shuffled
+                sample_images = center_df['image_path'].sample(frac=1.0, random_state=42).to_list()
             else:
-                sample_images = df['image_path'].sample(n=min(max_samples, len(df)), random_state=42).to_list()
+                sample_images = df['image_path'].sample(frac=1.0, random_state=42).to_list()
         except KeyError:
             # Fallback if raster_col_index or width aren't present
-            sample_images = df['image_path'].sample(n=min(max_samples, len(df)), random_state=42).to_list()
+            sample_images = df['image_path'].sample(frac=1.0, random_state=42).to_list()
         
         angles = []
         for img_path in sample_images:
             try:
                 angle = _get_grid_angle(img_path)
                 angles.append(angle)
+                if len(angles) >= max_samples:
+                    break
             except Exception as e:
-                print(f"Warning: Failed to compute grid angle for {img_path}: {e}")
+                print(f"Warning: Failed to compute grid angle for {img_path.name}: {e}")
                 
         if not angles:
-            print("Failed to auto-detect rotation, defaulting to 0.0")
-            return 0.0
+            raise ValueError(f"Failed to auto-detect rotation from any sample in {raster_path}")
             
         return float(np.median(angles))
 
@@ -165,10 +177,17 @@ class ImageStitcher:
         grouped = self.raster_data.groupby('image_path_parent')
 
         if rotation is None:
-            first_group_path = list(grouped.groups.keys())[0]
-            print(f"Auto-detecting optimal rotation from raster: {first_group_path}")
-            rotation = self.find_optimal_rotation(first_group_path)
-            print(f"Using optimal rotation: {rotation:.3f} degrees")
+            for group_path in grouped.groups.keys():
+                print(f"Auto-detecting optimal rotation from raster: {group_path}")
+                try:
+                    rotation = self.find_optimal_rotation(group_path)
+                    print(f"Using optimal rotation: {rotation:.3f} degrees from {group_path}")
+                    break
+                except ValueError as e:
+                    print(f"Warning: {e}. Trying next raster group...")
+            
+            if rotation is None:
+                raise ValueError("Failed to auto-detect rotation from any raster group. \n You may want to manually provide a rotation angle by setting the 'rotation' parameter in stitch_images().")
 
         success_counter = 0
         for image_parent, df in tqdm(grouped, desc='Stitching images.'):
