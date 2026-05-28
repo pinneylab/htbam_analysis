@@ -821,3 +821,413 @@ class HTBAMExperiment:
         
         plt.close(fig)
         print(f"Exported MM subplots by sample to {export_path}")
+
+    
+    def export_end_to_end_summary_by_sample(self,
+                           export_dir: str = 'end_to_end_summaries',
+                           sample_ids: list = None,
+                           button_quant_csv: str = 'button_quant.csv',
+                           standard_curve_csv: str = 'standard_data.csv.bz2',
+                           kinetics_csv: str = 'kinetics_data.csv.bz2',
+                           enzyme_conc_run: str = 'enzyme_concentrations',
+                           kinetics_fits_run: str = 'kinetics_ADP_conc_fits_bgsub',
+                           kinetics_raw_run: str = 'kinetics_ADP_conc',
+                           mm_fits_run: str = 'masked_fits_with_kcat_filtered',
+                           mm_pred_run: str = 'pred_data_div_E',
+                           mask_runs: dict = None,
+                           dpi: int = 150):
+        '''
+        Export a PDF of end-to-end processing for each SAMPLE with replicates.
+        '''
+        import tifffile
+        import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
+        import ast
+        import pandas as pd
+        from tqdm import tqdm
+        
+        # Load CSVs to DataFrames
+        tqdm.write("Loading CSVs for stamp images...")
+        bq_df = pd.read_csv(button_quant_csv)
+        sc_df = pd.read_csv(standard_curve_csv)
+        kin_df = pd.read_csv(kinetics_csv)
+
+        # 1. Fetch Data
+        enzyme_conc = self.get_run(enzyme_conc_run)
+        kinetics_fits = self.get_run(kinetics_fits_run)
+        kinetics_raw = self.get_run(kinetics_raw_run)
+        mf_fit = self.get_run(mm_fits_run)
+        
+        # Data objects
+        time_points = kinetics_raw.indep_vars.time
+        sc_conc = self.get_run('NADPH_standard').indep_vars.concentration
+        raw_rates = kinetics_raw.dep_var[..., 0] 
+        conc = kinetics_fits.indep_vars.concentration
+        slopes = kinetics_fits.dep_var[..., kinetics_fits.dep_var_type.index('slope')]
+
+        vmax_idx = mf_fit.dep_var_type.index('v_max')
+        kcat_idx = mf_fit.dep_var_type.index('kcat')
+        km_idx = mf_fit.dep_var_type.index('K_m')
+
+        all_kcats = mf_fit.dep_var[..., kcat_idx]
+        all_kms = mf_fit.dep_var[..., km_idx]
+
+        if mm_pred_run:
+            mf_pred = self.get_run(mm_pred_run)
+            yi = 0
+            preds = mf_pred.dep_var[..., yi]
+        else:
+            preds = None
+
+        # Masks
+        mask_data = {}
+        if mask_runs:
+            for m_name in mask_runs.keys():
+                mask_run = self.get_run(m_name)
+                # Assumes mask is DataND with dep_var_type ['mask']
+                mask_data[m_name] = mask_run.dep_var[..., 0].astype(bool)
+
+        chambers = enzyme_conc.indep_vars.chamber_IDs
+        samples = enzyme_conc.indep_vars.sample_IDs
+
+        unique_samples = np.unique(samples)
+        if sample_ids:
+            unique_samples = [s for s in unique_samples if s in sample_ids]
+
+        # Caching for TIFFs
+        tiff_cache = {}
+        def get_stamp(df, x_idx, y_idx, time_index=None, sc_conc_val=None):
+            # Find the row
+            mask = (df['x'] == x_idx) & (df['y'] == y_idx)
+            if time_index is not None:
+                if 'time_index' in df.columns:
+                    mask = mask & (df['time_index'] == time_index)
+                else:
+                    mask = mask & (df['index'] == time_index)
+            if sc_conc_val is not None:
+                # need to find closest conc if floating point issues
+                conc_col = 'concentration' if 'concentration' in df.columns else 'LMET_conc'
+                # Assuming concentration matches directly, or string match
+                mask = mask & (df['time_index'] == sc_conc_val) # wait! Standard curve CSV time_index holds the concentration index!
+                
+            sub = df[mask]
+            if len(sub) == 0:
+                return None
+            row = sub.iloc[0]
+            img_path = row['image_path']
+            
+            # replace bgsub_images with summary_images/bgsub_images
+            img_path = img_path.replace('bgsub_images', 'summary_images/bgsub_images')
+            
+            # resolve relative to experiment root
+            parts = Path(img_path).parts
+            if 'summary_images' in parts:
+                idx = parts.index('summary_images')
+                rel_img_path = Path(*parts[idx:])
+                abs_path = (Path(button_quant_csv).parent / rel_img_path).resolve()
+            else:
+                abs_path = (Path(button_quant_csv).parent / img_path).resolve()
+            
+            if abs_path not in tiff_cache:
+                try:
+                    tiff_cache[abs_path] = tifffile.memmap(str(abs_path))
+                except Exception as e:
+                    return None
+                    
+            img = tiff_cache[abs_path]
+            
+            y_start = (y_idx - 1) * 102 + 1
+            y_end = y_start + 100
+            x_start = (x_idx - 1) * 102 + 1
+            x_end = x_start + 100
+            
+            return img[y_start:y_end, x_start:x_end]
+
+        tqdm.write("Plotting end-to-end summaries...")
+        for sample in tqdm(unique_samples):
+            # Find chambers for this sample
+            sample_mask = (samples == sample)
+            chamber_indices = np.where(sample_mask)[0]
+            if len(chamber_indices) == 0:
+                continue
+
+            n_reps = len(chamber_indices)
+            
+            # Sample level kcat stdev
+            sample_kcats = all_kcats[chamber_indices]
+            mean_kcat = np.nanmean(sample_kcats)
+            std_kcat = np.nanstd(sample_kcats)
+            mean_km = np.nanmean(all_kms[chamber_indices])
+
+            max_conc = len(conc)
+            sc_num = len(sc_conc)
+            try:
+                max_timepoints = max(len(t) for t in time_points)
+            except Exception:
+                max_timepoints = len(time_points)
+            
+            ncols = 5
+            
+            bq_aspect = 1.0
+            sc_aspect = 1.0 / sc_num if sc_num > 0 else 1.0
+            kin_aspect = max_timepoints / max_conc if max_conc > 0 else 1.0
+            rates_aspect = 1.5
+            mm_aspect = float(n_reps)
+            
+            width_ratios = [bq_aspect, sc_aspect, kin_aspect, rates_aspect, mm_aspect]
+            total_aspect = sum(width_ratios)
+            
+            fig = plt.figure(figsize=(total_aspect * 2.5 * 1.15, n_reps * 2.5))
+            gs = gridspec.GridSpec(n_reps, ncols, figure=fig, width_ratios=width_ratios, wspace=0.3, hspace=0.4)
+            
+            # Extract units for plotting
+            p_unit = ""
+            if hasattr(kinetics_raw, 'dep_var_units') and len(kinetics_raw.dep_var_units) > 0:
+                pu = kinetics_raw.dep_var_units[0]
+                p_unit = f" ({pu:~})" if hasattr(pu, '__format__') else f" ({pu})"
+            
+            t_unit = ""
+            if hasattr(time_points, 'units'):
+                t_unit = f" ({time_points.units:~})"
+            elif hasattr(time_points, '__len__') and len(time_points) > 0 and hasattr(time_points[0], 'units'):
+                t_unit = f" ({time_points[0].units:~})"
+
+            # --- Setup Shared MM Plot ---
+            ax_mm = fig.add_subplot(gs[:, 4])
+            x_mm = conc
+            if hasattr(x_mm, "magnitude"): x_mm = x_mm.magnitude
+            x_range = np.linspace(0, max(x_mm), 100) if len(x_mm) > 0 else []
+            from htbam_analysis.analysis.fit import mm_model
+            if not np.isnan(mean_kcat) and not np.isnan(mean_km) and len(x_range) > 0:
+                mean_kcat_m = mean_kcat.magnitude if hasattr(mean_kcat, "magnitude") else mean_kcat
+                mean_km_m = mean_km.magnitude if hasattr(mean_km, "magnitude") else mean_km
+                std_kcat_m = std_kcat.magnitude if hasattr(std_kcat, "magnitude") else std_kcat
+                y_mean = mm_model(x_range, mean_kcat_m, mean_km_m)
+                y_up = mm_model(x_range, mean_kcat_m + std_kcat_m, mean_km_m)
+                y_down = mm_model(x_range, mean_kcat_m - std_kcat_m, mean_km_m)
+                ax_mm.fill_between(x_range, y_down, y_up, color="gray", alpha=0.3, label="Sample $\pm 1\sigma$ kcat")
+                ax_mm.plot(x_range, y_mean, "k--", label="Sample Fit")
+            c_unit = f" ({conc.units:~})" if hasattr(conc, 'units') else ""
+            v0_run = self.get_run("masked_V0_div_E_vs_conc")
+            v0_unit = ""
+            if hasattr(v0_run, 'dep_var_units') and len(v0_run.dep_var_units) > 0:
+                vu = v0_run.dep_var_units[0]
+                v0_unit = f" ({vu:~})" if hasattr(vu, '__format__') else f" ({vu})"
+                
+            ax_mm.set_xlabel(f"[S]{c_unit}", fontsize=10)
+            ax_mm.set_ylabel(f"$V_0/[E]${v0_unit}", fontsize=10)
+            ax_mm.set_title("Michaelis-Menten", fontsize=12)
+            ax_mm.tick_params(labelsize=8)
+
+            # --- First pass: gather stamps to compute global normalizations ---
+            sample_data = []
+            bq_all_pixels = []
+            sc_all_pixels = []
+            kin_all_pixels = []
+
+            for row_i, c_idx in enumerate(chamber_indices):
+                cid = chambers[c_idx]
+                x_idx, y_idx = map(int, cid.split(','))
+                
+                # Fetch BQ
+                stamp_bq = get_stamp(bq_df, x_idx, y_idx)
+                
+                # Fetch SC
+                sc_stamps = []
+                for ti in range(len(sc_conc)):
+                    st = get_stamp(sc_df, x_idx, y_idx, time_index=ti)
+                    if st is not None and st.shape == (100, 100):
+                        sc_stamps.append(st)
+                stacked_sc = np.vstack(sc_stamps) if sc_stamps else None
+
+                # Fetch KIN
+                kin_grid_rows = []
+                for conc_i in range(len(conc)):
+                    kin_row_stamps = []
+                    for ti in range(max_timepoints):
+                        mask = (kin_df['x'] == x_idx) & (kin_df['y'] == y_idx) & (kin_df['time_index'] == ti)
+                        sub = kin_df[mask & (kin_df['index'] == conc_i)]
+                        st = None
+                        if len(sub) > 0:
+                            row = sub.iloc[0]
+                            img_path = row['image_path'].replace('bgsub_images', 'summary_images/bgsub_images')
+                            parts = Path(img_path).parts
+                            if 'summary_images' in parts:
+                                idx_part = parts.index('summary_images')
+                                rel_img_path = Path(*parts[idx_part:])
+                                abs_path = (Path(button_quant_csv).parent / rel_img_path).resolve()
+                            else:
+                                abs_path = (Path(button_quant_csv).parent / img_path).resolve()
+                            if abs_path not in tiff_cache:
+                                try:
+                                    tiff_cache[abs_path] = tifffile.memmap(str(abs_path))
+                                except Exception:
+                                    pass
+                            if abs_path in tiff_cache:
+                                img = tiff_cache[abs_path]
+                                y_start = (y_idx - 1) * 102 + 1
+                                y_end = y_start + 100
+                                x_start = (x_idx - 1) * 102 + 1
+                                x_end = x_start + 100
+                                st = img[y_start:y_end, x_start:x_end]
+                        if st is not None and st.shape == (100, 100):
+                            kin_row_stamps.append(st)
+                        else:
+                            kin_row_stamps.append(np.zeros((100, 100))) # placeholder
+                            
+                    if kin_row_stamps:
+                        kin_grid_rows.append(np.hstack(kin_row_stamps))
+                
+                kin_grid = np.vstack(kin_grid_rows) if kin_grid_rows else None
+                
+                sample_data.append({
+                    'c_idx': c_idx, 'cid': cid, 'x_idx': x_idx, 'y_idx': y_idx,
+                    'bq': stamp_bq, 'sc': stacked_sc, 'kin': kin_grid
+                })
+
+                # Accumulate valid pixels for robust normalization (ignoring zero-padding and annotations > 55000)
+                def add_valid(img, pixel_list):
+                    if img is not None:
+                        mask = (img > 0) & (img < 55000)
+                        if np.any(mask):
+                            p = img[mask]
+                            if len(p) > 10000:
+                                p = np.random.choice(p, 10000, replace=False)
+                            pixel_list.append(p)
+
+                add_valid(stamp_bq, bq_all_pixels)
+                add_valid(stacked_sc, sc_all_pixels)
+                add_valid(kin_grid, kin_all_pixels)
+
+            def get_bounds(pixel_list):
+                if not pixel_list: return 0, 65535
+                arr = np.concatenate(pixel_list)
+                if len(arr) == 0: return 0, 65535
+                return np.percentile(arr, 1), np.percentile(arr, 99)
+
+            bq_vmin, bq_vmax = get_bounds(bq_all_pixels)
+            sc_vmin, sc_vmax = get_bounds(sc_all_pixels)
+            kin_vmin, kin_vmax = get_bounds(kin_all_pixels)
+
+            # --- Second pass: Plotting ---
+            for row_i, data in enumerate(sample_data):
+                c_idx, cid = data['c_idx'], data['cid']
+                x_idx, y_idx = data['x_idx'], data['y_idx']
+                
+                # Check global masks for this chamber
+                chamber_filtered_msg = None
+                for m_name, m_msg in mask_runs.items():
+                    m_arr = mask_data[m_name]
+                    if m_arr.shape == (len(chambers),):
+                        if not m_arr[c_idx]:
+                            chamber_filtered_msg = m_msg
+                            break
+                    elif m_arr.ndim == 2:
+                        if not np.any(m_arr[:, c_idx]):
+                            chamber_filtered_msg = f"Excluded: All Conc Filtered ({m_msg})"
+                            break
+
+                # Col 0: Button Quant
+                ax_bq = fig.add_subplot(gs[row_i, 0])
+                if data['bq'] is not None and data['bq'].shape == (100, 100):
+                    ax_bq.imshow(data['bq'], cmap='gray', vmin=bq_vmin, vmax=bq_vmax)
+                ax_bq.axis('off')
+                
+                e_c = enzyme_conc.dep_var[c_idx, 0]
+                e_unit = enzyme_conc.dep_var_units[0]
+                ax_bq.set_title(f"Rep {row_i+1}\n{cid}\n[E]: {e_c:.2f} {e_unit:~}", fontsize=8)
+
+                # Col 1: Standard Curve
+                ax_sc = fig.add_subplot(gs[row_i, 1])
+                if data['sc'] is not None:
+                    ax_sc.imshow(data['sc'], cmap='gray', vmin=sc_vmin, vmax=sc_vmax)
+                ax_sc.axis('off')
+                ax_sc.set_title("Std Curve", fontsize=8)
+
+                # Col 2: Kinetics
+                ax_kin = fig.add_subplot(gs[row_i, 2])
+                if data['kin'] is not None:
+                    ax_kin.imshow(data['kin'], cmap='gray', vmin=kin_vmin, vmax=kin_vmax)
+                ax_kin.axis('off')
+                ax_kin.set_title("Kinetics (t $\\rightarrow$, [S] $\\downarrow$)", fontsize=8)
+
+                # Col 3: Initial Rates
+                ax_rates = fig.add_subplot(gs[row_i, 3])
+                
+                colors = plt.cm.viridis(np.linspace(0, 1, max_conc))
+                
+                for conc_i in range(max_conc):
+                    # plot raw rates [P] vs time
+                    x_t = time_points[conc_i]
+                    if hasattr(x_t, 'magnitude'): x_t = x_t.magnitude
+                    
+                    y_p = raw_rates[conc_i, :, c_idx]
+                    if hasattr(y_p, 'magnitude'): y_p = y_p.magnitude
+                    
+                    # Determine if this conc was filtered
+                    conc_filtered = False
+                    conc_filter_msg = ""
+                    for m_name, m_msg in mask_runs.items():
+                        m_arr = mask_data[m_name]
+                        if m_arr.ndim == 2: # (conc, chamber)
+                            if not m_arr[conc_i, c_idx]:
+                                conc_filtered = True
+                                conc_filter_msg = m_msg
+                                break
+                    
+                    c = 'red' if conc_filtered else colors[conc_i]
+                    ls = '--' if conc_filtered else '-'
+                    
+                    ax_rates.scatter(x_t, y_p, color=c, s=5, alpha=0.5)
+                    
+                    # fit line: slope * x + intercept
+                    # we don't have intercept easily? Let's just plot from 0 to max(x_t)
+                    sl = slopes[conc_i, c_idx]
+                    if hasattr(sl, 'magnitude'): sl = sl.magnitude
+                    
+                    if not np.isnan(sl):
+                        # intercept = y_p[0] roughly, actually we have fit_concentration_vs_time 
+                        # Let's just draw a line from origin with `slope`?
+                        # Initial rate fit might have intercept, but we don't have it loaded.
+                        # Let's use y_p[1] - slope*x_t[1] as intercept approx
+                        if len(y_p) > 1 and not np.isnan(y_p[1]):
+                            interc = y_p[1] - sl * x_t[1]
+                            ax_rates.plot(x_t, sl * x_t + interc, color=c, ls=ls, lw=1)
+                            
+                    if conc_filtered and not chamber_filtered_msg:
+                        # annotate next to the last point
+                        ax_rates.text(x_t[-1], y_p[-1], conc_filter_msg, color='red', fontsize=6)
+                
+                if chamber_filtered_msg:
+                    # Draw red box and text
+                    for spine in ax_rates.spines.values():
+                        spine.set_edgecolor('red')
+                        spine.set_linewidth(2)
+                    ax_rates.text(0.5, 0.5, f"CHAMBER EXCLUDED:\n{chamber_filtered_msg}", 
+                                  color='red', fontsize=10, fontweight='bold',
+                                  ha='center', va='center', transform=ax_rates.transAxes,
+                                  bbox=dict(facecolor='white', alpha=0.8, edgecolor='red'))
+
+                ax_rates.set_xlabel(f"Time{t_unit}", fontsize=6)
+                ax_rates.set_ylabel(f"[P]{p_unit}", fontsize=6)
+                ax_rates.set_title("Initial Rates", fontsize=8)
+                ax_rates.tick_params(labelsize=6)
+
+                # MM Plot additions
+                if not chamber_filtered_msg:
+                    v0_div_e = self.get_run("masked_V0_div_E_vs_conc").dep_var[..., 0][:, c_idx]
+                    if hasattr(v0_div_e, "magnitude"): v0_div_e = v0_div_e.magnitude
+                    ax_mm.scatter(x_mm, v0_div_e, color="blue", s=15, zorder=5, alpha=0.5)
+                    if preds is not None:
+                        chamber_pred = preds[:, c_idx]
+                        if hasattr(chamber_pred, "magnitude"): chamber_pred = chamber_pred.magnitude
+                        ax_mm.plot(x_mm, chamber_pred, color="blue", linewidth=0.5, alpha=0.5)
+            if ax_mm.get_legend_handles_labels()[1]:
+                ax_mm.legend(fontsize=8)
+
+            Path(export_dir).mkdir(parents=True, exist_ok=True)
+            out_path = Path(export_dir) / f"{sample}.pdf"
+            plt.savefig(out_path, dpi=dpi, bbox_inches='tight')
+            plt.close(fig)
+            tqdm.write(f"Saved {out_path}")
+
