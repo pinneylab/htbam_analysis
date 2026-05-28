@@ -1018,6 +1018,17 @@ class HTBAMExperiment:
             ax_mm.set_ylabel(f"$V_0/[E]${v0_unit}", fontsize=10)
             ax_mm.set_title("Michaelis-Menten", fontsize=12)
             ax_mm.tick_params(labelsize=8)
+            
+            if not np.isnan(mean_kcat) and not np.isnan(mean_km):
+                kcat_u = mf_fit.dep_var_units[kcat_idx] if hasattr(mf_fit, 'dep_var_units') and len(mf_fit.dep_var_units) > kcat_idx else ""
+                kcat_u = f" {kcat_u:~}" if hasattr(kcat_u, '__format__') else (f" {kcat_u}" if kcat_u else "")
+                
+                km_u = mf_fit.dep_var_units[km_idx] if hasattr(mf_fit, 'dep_var_units') and len(mf_fit.dep_var_units) > km_idx else ""
+                km_u = f" {km_u:~}" if hasattr(km_u, '__format__') else (f" {km_u}" if km_u else "")
+                
+                text_str = f"$k_{{cat}}$: {mean_kcat_m:.2f} $\\pm$ {std_kcat_m:.2f}{kcat_u}\n$K_M$: {mean_km_m:.2f}{km_u}"
+                ax_mm.text(0.05, 0.95, text_str, transform=ax_mm.transAxes, fontsize=8,
+                           verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='lightgray'))
 
             # --- First pass: gather stamps to compute global normalizations ---
             sample_data = []
