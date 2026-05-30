@@ -79,9 +79,12 @@ def inhibition_model(x, r_max, r_min, ic50):
 
 
 ### Fitting functions for DB objects:
-def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1,
+### N.B. This version is deprecated. 
+### To select kept points using max_reaction_percent, this function averages datapoints across chambers. 
+### The new function fit_concentration_vs_time selects kept points per-well. This is slower but preferred.
+def fit_concentration_vs_time_fast(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1,
                               max_reaction_percent: float = 100,
-                              fit_windows_per_concentration: dict = None) -> Data3D:
+                              fit_windows_per_concentration: dict = None) -> Tuple[Data3D, Data3D]:
     """
     Fit y = β0 + β1·x with scikit-learn, returning slope & intercept
     in a data-dict that mirrors the original structure.
@@ -107,11 +110,13 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
 
     Returns
     -------
-    result : Data3D
-        Data object with dep_var of shape (n_conc, n_chamb, 3) containing:
-    - slope
-    - intercept
-    - r_squared
+    result : Tuple (Data3D, Data3D)
+                Data3D: Data object with dep_var of shape (n_conc, n_chamb, 3) containing:
+                    - slope
+                    - intercept
+                    - r_squared
+                Data3D: Data object with dep_var of shape (n_conc, n_chamb, 1) containing:
+                    - mask boolean
     """
     start = time.time()
     
@@ -153,6 +158,11 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
 
     # If user provided per-concentration fit windows, validate them and prepare a mapping
     concs = indep.concentration
+    if hasattr(concs, 'to') and y_unit is not None:
+        try:
+            concs = concs.to(y_unit)
+        except DimensionalityError as e:
+            raise ValueError(f"Cannot convert substrate concentration units ({concs.units}) to product concentration units ({y_unit}).") from e
     if hasattr(concs, 'magnitude'):
         concs = concs.magnitude
     concs = np.asarray(concs)
@@ -178,6 +188,8 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
             s, e = int(v[0]), int(v[1])
             per_conc_windows[float(kf)] = (s, e)
 
+    raw_fit_mask = np.zeros(Y.shape, dtype=bool)
+
     for i in range(n_conc):
         # If per-concentration windows were provided, use them for this concentration
         if per_conc_windows is not None:
@@ -185,20 +197,24 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
             start_idx, end_idx = per_conc_windows[conc_val]
             Xi = T[i, start_idx:end_idx].reshape(-1, 1)          # (Ti, 1)
             yi = Y[i, start_idx:end_idx, :]                      # (Ti, K)
+            time_slice = slice(start_idx, end_idx)
         else:
             ### NF: Want to the new max_reaction_percent logic more thoroughly
             # Default window if no per-concentration windows are provided
             Xi = T[i, start_timepoint:end_timepoint].reshape(-1, 1)          # (Ti, 1)
             yi = Y[i, start_timepoint:end_timepoint, :]                      # (Ti, K)
+            
+            real_end = T.shape[1] if end_timepoint == -1 else (T.shape[1] + end_timepoint if end_timepoint < 0 else end_timepoint)
+            time_slice = slice(start_timepoint, real_end)
 
             if max_reaction_percent < 100:
                 # Calculate max product concentration (averaged across chambers!) for this concentration
-                # Here, we're averaging across timepoints, then taking the max of the average.
+                # Here, we're averaging across timepoints.
                 # May not be perfect but could clear up some noise!
                 mean_trace = np.nanmean(Y[i], axis=1)
-                max_val = np.nanmax(mean_trace)
                 min_val = np.nanmin(mean_trace)
-                cutoff_val = min_val + (max_val - min_val) * (max_reaction_percent / 100.0)
+                theoretical_max = float(concs[i])
+                cutoff_val = min_val + (theoretical_max * (max_reaction_percent / 100.0))
 
                 # Find the first timepoint where the mean trace exceeds the cutoff
                 exceed_indices = np.where(mean_trace > cutoff_val)[0]
@@ -213,6 +229,7 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
                         slice_end = max(0, local_cutoff_idx)
                         Xi = Xi[:slice_end]
                         yi = yi[:slice_end]
+                        time_slice = slice(start_timepoint, start_timepoint + slice_end)
             ######################################
 
         # 1. keep chambers that have *no* NaNs over time
@@ -230,6 +247,10 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
         if len(Xi_c) < 2:                          # need ≥2 points for a line
             continue
 
+        # Set raw_fit_mask to True for the used points
+        valid_time_indices = np.arange(T.shape[1])[time_slice][good_rows]
+        raw_fit_mask[np.ix_([i], valid_time_indices, np.where(good_chamb)[0])] = True
+
         # 3. multi-output linear regression
         model.fit(Xi_c, y_good_c)
         intercept[i, good_chamb] = model.intercept_      # (K_good,)
@@ -246,15 +267,19 @@ def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint
     n_conc = indep.time.shape[0]  # number of concentrations
     n_chamb = indep.chamber_IDs.shape[0]  # number of chambers
 
+    # Reshape raw_fit_mask to have an extra dimension
+    raw_fit_mask = raw_fit_mask[:, :, :, np.newaxis]
+    fit_points_mask = make_custom_mask(data, raw_fit_mask, info='points chosen for linear fit')
+
     elapsed = time.time() - start
     print(f'Fit slopes for {n_chamb} wells at {n_conc} concentrations.')
     print('Elapsed', np.round(elapsed, 3), 'seconds.')
 
-    return output_data
+    return output_data, fit_points_mask
 
 ### Fitting functions for DB objects:
-def fit_concentration_vs_time_2(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1,
-                              max_reaction_percent: float = 100,
+def fit_concentration_vs_time(data: Data4D, *, min_pts: int = 2, start_timepoint: int = 0, end_timepoint: int = -1,
+                              max_reaction_percent: float = 10,
                               fit_windows_per_concentration: dict = None) -> Data3D:
     """
     Fit y = β0 + β1·x with scikit-learn, returning slope & intercept
@@ -281,11 +306,13 @@ def fit_concentration_vs_time_2(data: Data4D, *, min_pts: int = 2, start_timepoi
 
     Returns
     -------
-    result : Data3D
-        Data object with dep_var of shape (n_conc, n_chamb, 3) containing:
-    - slope
-    - intercept
-    - r_squared
+    result : Tuple (Data3D, Data3D)
+                Data3D: Data object with dep_var of shape (n_conc, n_chamb, 3) containing:
+                    - slope
+                    - intercept
+                    - r_squared
+                Data3D: Data object with dep_var of shape (n_conc, n_chamb, 1) containing:
+                    - mask boolean
     """
     start = time.time()
     
@@ -327,8 +354,14 @@ def fit_concentration_vs_time_2(data: Data4D, *, min_pts: int = 2, start_timepoi
 
     # If user provided per-concentration fit windows, validate them and prepare a mapping
     concs = indep.concentration
+    if hasattr(concs, 'to') and y_unit is not None:
+        try:
+            concs = concs.to(y_unit)
+        except DimensionalityError as e:
+            raise ValueError(f"Cannot convert substrate concentration units ({concs.units}) to product concentration units ({y_unit}).") from e
     if hasattr(concs, 'magnitude'):
         concs = concs.magnitude
+    
     concs = np.asarray(concs)
 
     # Create an array to store the mask that indicates which points are included in the fit
@@ -376,16 +409,12 @@ def fit_concentration_vs_time_2(data: Data4D, *, min_pts: int = 2, start_timepoi
             if max_reaction_percent < 100:
                 # Calculate max product concentration (just in this chamber!) for this concentration
                 trace = Y[i, :, j]
-                max_val = np.nanmax(trace)
                 min_val = np.nanmin(trace)
-                cutoff_val = min_val + (max_val - min_val) * (max_reaction_percent / 100.0)
-
+                theoretical_max = float(concs[i])
+                cutoff_val = min_val + (theoretical_max * (max_reaction_percent / 100.0))
+                
                 # Find the first timepoint where the trace exceeds the cutoff
-                #print()
-                #print(trace)
-                #print(cutoff_val)
                 exceed_indices = np.where(trace > cutoff_val)[0]
-                #print(exceed_indices)
 
                 if exceed_indices.size == 0:
                     continue
@@ -794,108 +823,3 @@ def fit_nonlinear_models(
         'r_squared': r_squared
     }
 
-
-# #
-# #fit(my_data: DataND, x_label='concentration', y_label='initial_rate', fit_function: callable)
-# def fit_general(
-#     data: Data3D,
-#     x_label: str,
-#     y_label: str,
-#     fit_function: callable,
-#     *,
-#     min_pts: int = 2,
-#     bounds: tuple = (-np.inf, np.inf),
-#     maxfev: int = 10000,
-#     p0: List[float] = None
-# ) -> Tuple[Data2D, Data3D]:
-#     """
-#     Fit a user-defined nonlinear function to y vs x.
-
-#     Parameters
-#     ----------
-#     data : Data3D
-#         Data object with indep_vars and dep_var.
-#     x_label : str
-#         Label of the independent variable in indep_vars.
-#     y_label : str
-#         Label of the dependent variable in dep_var_type.
-#     fit_function : callable
-#         Callable of the form fit_function(x, *params) -> y. The first argument is x,
-#         followed by N parameters to fit. For example:
-
-#             def mm_model(x, v_max, K_m):
-#                 return v_max * x / (K_m + x)
-#     min_pts : int, optional
-#         Minimum number of (x, y) pairs required for a fit (default 2).
-#     bounds : 2-tuple of array-like, optional
-#         Lower and upper bounds on parameters, passed to `curve_fit`.
-#         Defaults to no bounds (i.e. `(-inf, +inf)`).
-#     maxfev : int, optional
-#         Maximum number of function evaluations in `curve_fit`. Default is 10000.
-#     p0 : sequence or None, optional
-#         Initial guess for the fit parameters. If None, defaults to `[1.0]*N_params`.
-#         Must have length = number of parameters in fit_function (i.e. signature minus 1).
-
-#     Returns
-#     -------
-#     Data2D: data object with dep_var of shape (n_chamb, N_params + 1) containing:
-#     - fitted parameters (N_params)
-#     - R² values (r_squared)
-#     Data3D: data object with dep_var of shape (n_points, n_chamb, 1) containing:
-#     - predicted y values (y_pred)
-#     """
-#     assert isinstance(data, Data3D), "data must be Data3D."
-#     start = time.time()
-    
-#     indep = data.indep_vars
-#     dep   = data.dep_var
-
-#     if x_label not in indep.__dict__:
-#         raise KeyError(f"'{x_label}' not in indep_vars.")
-#     if y_label not in data.dep_var_type:
-#         raise KeyError(f"'{y_label}' not in dep_var_type.")
-
-#     x = getattr(indep, x_label)                       # (n_points,)
-#     y_idx = data.dep_var_type.index(y_label)
-#     y = dep[..., y_idx]                               # (n_points, n_chamb)
-
-#     # perform fits
-#     results = fit_nonlinear_models(
-#         x,
-#         y,
-#         fit_function,
-#         p0=p0 or [1.0] * (len(inspect.signature(fit_function).parameters) - 1),
-#         bounds=bounds,
-#         maxfev=maxfev
-#     )
-#     params = results["params"]            # (n_chamb, N_params)
-#     y_pred = results["y_pred"]            # (n_points, n_chamb)
-#     r2 = results["r_squared"]             # (n_chamb,)
-
-#     num_successful_fits = np.sum(~np.isnan(params).any(axis=1))
-#     print(f'Successfully fit nonlinear model for {num_successful_fits} wells.')
-#     print('Elapsed', np.round(time.time() - start, 3), 'seconds.')
-
-#     # 1) build Data2D of params + R²
-#     param_names = list(inspect.signature(fit_function).parameters.keys())[1:]
-#     dep2d = np.concatenate([params, r2[:,None]], axis=1)  # (n_chamb, Np+1)
-#     names2d = param_names + ["r_squared"]
-#     meta2d  = Meta(fit_type=fit_function.__name__,)
-#     params_data = Data2D(
-#         indep_vars=deepcopy(data.indep_vars),
-#         dep_var=dep2d,
-#         dep_var_type=names2d,
-#         meta=meta2d
-#     )
-#     # 2) build Data3D of predictions
-#     n_points, n_chamb = y_pred.shape
-#     pred3d = y_pred.reshape(n_points, n_chamb, 1)   
-#     meta3d = Meta(fit_type=fit_function.__name__)
-#     ypred_data = Data3D(
-#         indep_vars=deepcopy(data.indep_vars),
-#         dep_var=pred3d,
-#         dep_var_type=["y_pred"],
-#         meta=meta3d
-#     )
-
-#     return params_data, ypred_data
