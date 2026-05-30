@@ -14,14 +14,14 @@ if TYPE_CHECKING:
 def find_free_port(start_port=8050):
     port = start_port
     attempts = 0
-    while attempts < 50:
+    while attempts < 200:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             # Check if port is in use
             if s.connect_ex(('localhost', port)) != 0:
                 return port
             port += 1
             attempts += 1
-    raise Exception("No free ports found in range 8050-8100")
+    raise Exception(f"No free ports found in range {start_port}-{start_port+200}")
 
 # HTBAM Data
 from htbam_analysis.db_api.data import Data4D, Data3D, Data2D
