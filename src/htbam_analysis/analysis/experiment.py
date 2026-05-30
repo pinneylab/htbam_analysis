@@ -406,9 +406,10 @@ class HTBAMExperiment:
         kcat_units = f"{kcat_unit_obj:~}"
         kM_units = f"{run_data.dep_var_units[1]:~}"
         E_units = f"{E_unit_obj:~}"
+        vmax_units = f"{vmax_unit_obj:~}"
 
         # New empty dataframe:
-        df = pd.DataFrame(columns=['chamber', 'sample', f'k_cat ({kcat_units})', f'K_M ({kM_units})', f'E_conc ({E_units})', 'fit_R2'])
+        df = pd.DataFrame(columns=['chamber', 'sample', f'v_max ({vmax_units})', f'k_cat ({kcat_units})', f'K_M ({kM_units})', f'E_conc ({E_units})', 'fit_R2'])
 
         # Iterate over chambers
         for chamber in chamber_names:
@@ -427,6 +428,7 @@ class HTBAMExperiment:
             df = pd.concat([df, pd.DataFrame([{
                 'chamber': chamber,
                 'sample': sample_names[chamber_index][0],
+                f'v_max ({vmax_units})': chamber_vmax,
                 f'k_cat ({kcat_units})': chamber_kcat,
                 f'K_M ({kM_units})': chamber_kM,
                 f'E_conc ({E_units})': chamber_E_conc,

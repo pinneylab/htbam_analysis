@@ -3,8 +3,11 @@ import plotly.graph_objs as go
 import base64
 import tempfile
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 import numpy as np
 import socket
+import io
+
 
 # Utilities
 from typing import TYPE_CHECKING, List, Dict, Optional, Any
@@ -14,14 +17,14 @@ if TYPE_CHECKING:
 def find_free_port(start_port=8050):
     port = start_port
     attempts = 0
-    while attempts < 50:
+    while attempts < 200:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             # Check if port is in use
             if s.connect_ex(('localhost', port)) != 0:
                 return port
             port += 1
             attempts += 1
-    raise Exception("No free ports found in range 8050-8100")
+    raise Exception(f"No free ports found in range {start_port}-{start_port+200}")
 
 # HTBAM Data
 from htbam_analysis.db_api.data import Data4D, Data3D, Data2D
@@ -137,18 +140,21 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None, c
             chamber_id = str(pt['x']) + ',' + str(pt['y'])
             bbox = pt["bbox"]
             chamber_name = chamber_names[chamber_id]
-            #get the data for the point:
-            fig, ax = plt.subplots()
+            
+            #get the data for the point using a local, thread-safe Figure:
+            fig = Figure()
+            ax = fig.subplots()
             ax = graphing_function(chamber_id, ax)
             #reduce whitespace on margins of graph:
             fig.subplots_adjust(left=0.1, bottom=0.1, right=0.9, top=0.9, wspace=0, hspace=0)
-            #save the figure as a temp file:
-            tempfile_name = tempfile.NamedTemporaryFile().name+'.png'
-            plt.savefig(tempfile_name)
-            plt.close()
-            # #read in temp file as base64 encoded string:
-            with open(tempfile_name, "rb") as image_file:
-                img_src = "data:image/png;base64," + str(base64.b64encode(image_file.read()).decode("utf-8"))
+            
+            #save the figure to an in-memory buffer:
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png")
+            buf.seek(0)
+            
+            #read in buffer as base64 encoded string:
+            img_src = "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
             children = [
                 html.Div(children=[
                     #no space after header:
@@ -238,15 +244,19 @@ def plot_chip(plotting_var, chamber_names, graphing_function=None, title=None, c
             cid = f"{pt['x']},{pt['y']}"
             sample = chamber_names.get(cid, "")
 
-            # generate inset plot PNG
-            fig2, ax2 = plt.subplots()
+            import io
+            from matplotlib.figure import Figure
+            
+            # generate inset plot PNG using a local, thread-safe Figure
+            fig2 = Figure()
+            ax2 = fig2.subplots()
             ax2 = graphing_function(cid, ax2)
             fig2.subplots_adjust(left=0.1, bottom=0.1, right=0.9, top=0.9)
-            tmp = tempfile.NamedTemporaryFile().name + ".png"
-            plt.savefig(tmp)
-            plt.close(fig2)
-            with open(tmp, "rb") as f:
-                img_src = "data:image/png;base64," + base64.b64encode(f.read()).decode("utf-8")
+            
+            buf = io.BytesIO()
+            fig2.savefig(buf, format="png")
+            buf.seek(0)
+            img_src = "data:image/png;base64," + base64.b64encode(buf.read()).decode("utf-8")
 
             # return side‐panel contents
             return html.Div([
@@ -385,9 +395,18 @@ def plot_standard_curve_chip(experiment: 'HTBAMExperiment', analysis_name: str, 
         b = intercepts_to_plot[chamber_names == chamber_id]
         
         #make a simple matplotlib plot
-        ax.scatter(x_data, y_data)
+        ax.plot(x_data, y_data, marker='o', linestyle='none')
         if not (np.isnan(m) or np.isnan(b)):
-            ax.plot(x_data, m*x_data + b)
+            if len(x_data) > 0:
+                if hasattr(x_data, 'magnitude'):
+                    x_min, x_max = np.nanmin(x_data.magnitude), np.nanmax(x_data.magnitude)
+                    x_line = np.array([x_min, x_max]) * x_data.units
+                else:
+                    x_min, x_max = np.nanmin(x_data), np.nanmax(x_data)
+                    x_line = np.array([x_min, x_max])
+                ax.plot(x_line, m*x_line + b)
+            else:
+                ax.plot(x_data, m*x_data + b)
             ax.set_title(f'{chamber_id}: {sample_names_dict[chamber_id]}')
             ax.set_xlabel(f'Concentration ({concentration.units:~})')
             ax.set_ylabel(f'Luminance ({luminance.units:~})')
@@ -490,12 +509,22 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
 
         for i in range(y_data.shape[0]): #over each substrate concentration:
 
-            ax.scatter(x_data[i], y_data[i,:].flatten(), color=colors[i], alpha=0.3) # raw data
+            ax.plot(x_data[i], y_data[i,:].flatten(), marker='o', linestyle='none', color=colors[i], alpha=0.3) # raw data
 
             # Plot the fit points with alpha=1
-            ax.scatter(x_data_masked[i], y_data_masked[i,:].flatten(), color=colors[i], alpha=1)
+            ax.plot(x_data_masked[i], y_data_masked[i,:].flatten(), marker='o', linestyle='none', color=colors[i], alpha=1)
             
-            ax.plot(x_data[i], m[i]*x_data[i] + b[i], color=colors[i], alpha=1, linewidth=2, label=f'{substrate_conc[i]:~}')  # fitted line
+            # Draw fitted line using only the min and max x values for speed
+            x_vals = x_data[i]
+            if len(x_vals) > 0:
+                if hasattr(x_vals, 'magnitude'):
+                    x_min, x_max = np.nanmin(x_vals.magnitude), np.nanmax(x_vals.magnitude)
+                    x_line = np.array([x_min, x_max]) * x_vals.units
+                else:
+                    x_min, x_max = np.nanmin(x_vals), np.nanmax(x_vals)
+                    x_line = np.array([x_min, x_max])
+                    
+                ax.plot(x_line, m[i]*x_line + b[i], color=colors[i], alpha=1, linewidth=2, label=f'{substrate_conc[i]:~}')  # fitted line
 
         # Set axis limits if provided
         if plot_xmax is not None:
@@ -577,8 +606,8 @@ def plot_product_vs_time_chip(experiment: 'HTBAMExperiment', experiment_name: st
         colors = sns.color_palette('husl', n_colors=y_data.shape[0])
 
         for i in range(y_data.shape[0]):
-            ax.scatter(x_data[i], y_data[i, :].flatten(), color=colors[i], alpha=0.3)
-            ax.scatter(x_data_masked[i], y_data_masked[i, :].flatten(), color=colors[i], alpha=1)
+            ax.plot(x_data[i], y_data[i, :].flatten(), marker='o', linestyle='none', color=colors[i], alpha=0.3)
+            ax.plot(x_data_masked[i], y_data_masked[i, :].flatten(), marker='o', linestyle='none', color=colors[i], alpha=1)
 
         # Set axis limits if provided
         if plot_xmax is not None:
@@ -636,7 +665,7 @@ def plot_initial_rates_vs_concentration_chip(experiment: 'HTBAMExperiment',
         idx = (chambers == cid)
         x   = conc
         y   = slopes[:, idx].flatten()
-        ax.scatter(x, y, alpha=0.7)
+        ax.plot(x, y, marker='o', linestyle='none', alpha=0.7)
 
         if model_pred_data_name:
             y_p = preds[:, idx].flatten()
@@ -705,7 +734,7 @@ def plot_MM_chip(experiment: 'HTBAMExperiment',
         idx = (chambers == cid)
         x   = conc
         y   = slopes[:, idx].flatten()
-        ax.scatter(x, y, alpha=0.7, label="current well")
+        ax.plot(x, y, marker='o', linestyle='none', alpha=0.7, label="current well")
 
         if model_pred_data_name:
             # show envelope of model fits for all wells with this sample
@@ -784,7 +813,7 @@ def plot_MM_div_E_chip(experiment: 'HTBAMExperiment',
         idx = (chambers == cid)
         x   = conc
         y   = slopes[:, idx].flatten()
-        ax.scatter(x, y, alpha=0.7, label="current well")
+        ax.plot(x, y, marker='o', linestyle='none', alpha=0.7, label="current well")
 
 
         sample = sample_names[cid]
@@ -890,7 +919,7 @@ def plot_ic50_chip(experiment: 'HTBAMExperiment',
         idx = (chambers == cid)
         x   = conc
         y   = slopes[:, idx].flatten()
-        ax.scatter(x, y, alpha=0.7, label="current well")
+        ax.plot(x, y, marker='o', linestyle='none', alpha=0.7, label="current well")
 
         if model_pred_data_name:
             # show envelope of model fits for all wells with this sample
