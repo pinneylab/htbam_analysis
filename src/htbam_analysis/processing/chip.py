@@ -130,7 +130,7 @@ class ChipImage:
             [[x, y] for x in range(0, xdim) for y in range(0, ydim)]
         ).reshape(xdim, ydim, 2)
 
-        a = np.empty((xdim, ydim), dtype=np.object)
+        a = np.empty((xdim, ydim), dtype=object)
         for x, y in indices.reshape((xdim * ydim, 2)):
             stamp = imgstamps[x, y]
             center = self.centers[x, y]
@@ -536,7 +536,7 @@ class Stamp:
         imageCopy = img.copy()
         mask = np.zeros(imageCopy.shape)
         cv2.circle(mask, center, radius, 1, -1)  # Warning: MODIFIES mask IN PLACE!!
-        mask = mask.astype(np.bool)
+        mask = mask.astype(bool)
 
         insert = np.where(mask)
         intensities = img[insert]
@@ -576,7 +576,15 @@ class Stamp:
                 warnings.simplefilter(
                     "ignore"
                 )  # Will throw warning due to precision loss
-                cimg = skimage.img_as_ubyte(img, force_copy=True)
+                img_float = img.astype(np.float32)
+                p_low, p_high = np.percentile(img_float, (2, 98))
+                if p_high > p_low:
+                    img_float = np.clip(img_float, p_low, p_high)
+                    cimg = ((img_float - p_low) / (p_high - p_low) * 255.0).astype(np.uint8)
+                else:
+                    cimg = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                
+                cimg = cv2.medianBlur(cimg, 3)
 
             # searchRadii
             minRad = chamberRadius
@@ -595,6 +603,7 @@ class Stamp:
             )
 
             circlePara1Index = self.circlePara1Index
+            circlePara2Index = self.circlePara2Index
             # If no circles found, loosen gradient threshold
             while type(circles) is not np.ndarray and circlePara1Index > 5:
                 circles = cv2.HoughCircles(
@@ -603,11 +612,13 @@ class Stamp:
                     2,
                     10,
                     param1=circlePara1Index,
-                    param2=self.circlePara2Index,
+                    param2=circlePara2Index,
                     minRadius=minRad + 1,
                     maxRadius=maxRad + 2,
                 )
-                circlePara1Index -= 1
+                circlePara1Index -= 2
+                if circlePara2Index > 15:
+                    circlePara2Index -= 1
 
             # If still none found, return a blank chamber (failed)
             if not np.any(circles):
