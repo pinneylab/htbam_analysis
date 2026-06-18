@@ -6,7 +6,7 @@ from collections import namedtuple
 
 import numpy as np
 import numpy.ma as ma
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import pandas as pd
 
 from typing import List
@@ -221,7 +221,7 @@ class ChipImage:
 
         """
 
-        for c in self.stamps.flatten():
+        for c in tqdm(self.stamps.flatten(), desc="Finding chambers", leave=False):
             c.findChamber(coerce_center=coerce_center)
 
     def findButtons(self):
@@ -236,7 +236,7 @@ class ChipImage:
 
         """
 
-        for c in tqdm(self.stamps.flatten(), desc="Finding Buttons"):
+        for c in tqdm(self.stamps.flatten(), desc="Finding buttons", leave=False):
             c.findButton()
 
     def summarize(self):

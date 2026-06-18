@@ -10,7 +10,7 @@ __version__ = "0.1.0"
 
 import skimage
 import pandas as pd
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from pathlib import Path
 from typing import Union, List, Tuple
 
@@ -129,7 +129,7 @@ class Processor:
     ):
         """Process images with manually provided corners."""
         data = []
-        for i in tqdm(range(len(self.image_data)), desc='Processing images'):
+        for i in tqdm(range(len(self.image_data)), desc='Processing images', leave=False):
 
             dname, image, c = self.image_data[['dname', 'image_path', 'corners']].iloc[i]
             chip_image = chip.ChipImage(self.experiment.devices[dname], image, c)
@@ -155,7 +155,7 @@ class Processor:
         """Process images by mapping from reference images."""
 
         data = []
-        for i in tqdm(range(len(self.image_data)), desc='Processing images'):
+        for i in tqdm(range(len(self.image_data)), desc='Processing images', leave=False):
 
             dname, image = self.image_data[['dname', 'image_path']].iloc[i]
 
