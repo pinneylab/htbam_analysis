@@ -4,7 +4,6 @@ from htbam_analysis.analysis.fit import (
     mm_model,
     inhibition_model,
     fit_concentration_vs_time,
-    fit_concentration_vs_time_2,
     fit_luminance_vs_concentration,
     fit_initial_rates_vs_concentration_with_function
 )
@@ -64,9 +63,10 @@ class TestFitFunctions(unittest.TestCase):
         )
         
         # Run fit
-        fit_results = fit_concentration_vs_time(data_4d)
+        fit_results, fit_mask = fit_concentration_vs_time(data_4d, max_reaction_percent=100)
         
         self.assertIsInstance(fit_results, Data3D)
+        self.assertIsInstance(fit_mask, Data4D)
         self.assertListEqual(["slope", "intercept", "r_squared"], fit_results.dep_var_type)
         
         # Slopes should be 2.0
