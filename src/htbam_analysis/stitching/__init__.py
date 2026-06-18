@@ -270,6 +270,66 @@ class ImageStitcher:
             else:
                 print(f"Failed to stitch with rotation {rotation}: {error_msg}")
 
+    def test_stitching_overlaps(
+        self, 
+        raster_path: Path, 
+        rotation: float,
+        overlaps: List[float], 
+        acqui_origin: Tuple[bool, bool], 
+        outdir: Path
+        ):
+        """
+        Test stitching a specific raster with different overlap parameters.
+        
+        Args:
+            raster_path: Path to the directory containing the raster images
+            overlaps: List of overlap fractions to test
+            rotation: Rotation angle to use
+            acqui_ori: Acquisition origin tuple (e.g., (True, False))
+            output_dir: Directory to save the stitched images
+        """
+        # Filter raster data for this specific raster
+        raster_path = Path(raster_path) if not isinstance(raster_path, Path) else raster_path
+        mask = self.raster_data['image_path_parent'] == raster_path
+        df = self.raster_data[mask]
+        
+        if df.empty:
+            raise ValueError(f"No raster data found for {raster_path}")
+        
+        # Extract parameters
+        width, height, ff_correction = df[['raster_width', 'raster_height', 'apply_ff_correction']].iloc[0]
+        width, height = int(width), int(height)
+        raster = df['image_path'].to_list()
+        
+        # Hard-coded size (consistent with stitch_images method)
+        SIZE = 1600
+        
+        # Ensure output directory exists
+        outdir.mkdir(parents=True, exist_ok=True)
+        
+        # Stitch for each rotation
+        for overlap in overlaps:
+            params = rastering.RasterParams(
+                overlap, 
+                size=SIZE, 
+                acqui_ori=acqui_origin, 
+                rotation=rotation, 
+                dims=(width, height), 
+                auto_ff=ff_correction, 
+                ff_type='BaSiC'
+            )
+            
+            # Create output path with rotation in filename
+            outpath = outdir / f"stitched_overlap_{overlap}.tif"
+            
+            # Stitch and save
+            success, stitched_path, error_msg = stitch_single_raster(raster, params, outpath)
+            
+            if success:
+                print(f"Successfully stitched with overlap {overlap}: {stitched_path}")
+            else:
+                print(f"Failed to stitch with overlap {overlap}: {error_msg}")
+
 
 def backgroud_subtract(background_image, target_image):
 
