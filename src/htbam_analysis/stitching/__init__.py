@@ -8,7 +8,7 @@ __author__ = """Jonathan Zhang"""
 __email__ = ""
 __version__ = "1.3.0"
 
-
+import yaml
 import shutil
 import numpy as np
 import pandas as pd
@@ -16,6 +16,13 @@ from tqdm import tqdm
 from skimage import io, filters, transform
 from pathlib import Path
 from typing import Tuple, Union, List, Optional
+
+# load config with defaults, if exists
+config_path = Path(__file__).parent / "config.yaml"
+if config_path.exists():
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+
 
 def _get_grid_angle(image_path: Path) -> float:
     """Helper function to find the grid rotation angle of a single raw image."""
@@ -98,6 +105,7 @@ class ImageStitcher:
 
         self.raster_data = self.load_raster_data()
         self.stitched_image_data = None
+        self.setup = set(self.raster_data['setup'].tolist()).pop()
         
     def load_raster_data(self):
 
@@ -177,17 +185,25 @@ class ImageStitcher:
         grouped = self.raster_data.groupby('image_path_parent')
 
         if rotation is None:
-            for group_path in grouped.groups.keys():
-                print(f"Auto-detecting optimal rotation from raster: {group_path}")
-                try:
-                    rotation = self.find_optimal_rotation(group_path)
-                    print(f"Using optimal rotation: {rotation:.3f} degrees from {group_path}")
-                    break
-                except ValueError as e:
-                    print(f"Warning: {e}. Trying next raster group...")
-            
-            if rotation is None:
-                raise ValueError("Failed to auto-detect rotation from any raster group. \n You may want to manually provide a rotation angle by setting the 'rotation' parameter in stitch_images().")
+
+            # first get default config rotation, if exists
+            rotation = config.get('setups', {}).get(self.setup, {}).get('rotation', None)
+
+            if rotation:
+                print(f"Using default rotation: {rotation:.3f} degrees from config.yaml")
+
+            else:
+                for group_path in grouped.groups.keys():
+                    print(f"Auto-detecting optimal rotation from raster: {group_path}")
+                    try:
+                        rotation = self.find_optimal_rotation(group_path)
+                        print(f"Using optimal rotation: {rotation:.3f} degrees from {group_path}")
+                        break
+                    except ValueError as e:
+                        print(f"Warning: {e}. Trying next raster group...")
+                
+                if rotation is None:
+                    raise ValueError("Failed to auto-detect rotation from any raster group. \n You may want to manually provide a rotation angle by setting the 'rotation' parameter in stitch_images().")
 
         success_counter = 0
         for image_parent, df in tqdm(grouped, desc='Stitching images.'):
