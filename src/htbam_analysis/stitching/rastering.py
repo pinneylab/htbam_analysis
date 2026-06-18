@@ -24,6 +24,14 @@ def rotate_image(img, rotation_val) -> np.array:
     return transform.rotate(img, rotation_val, **rotation_params).astype("uint16")
 
 
+def find_imaging_csv(img_path: pathlib.Path) -> pathlib.Path:
+    for parent in img_path.resolve().parents:
+        csv_path = parent / "imaging.csv"
+        if csv_path.exists():
+            return csv_path
+    raise FileNotFoundError(f"imaging.csv not found in parents of {img_path}")
+
+
 class RasterParams:
     def __init__(
         self,
@@ -117,6 +125,10 @@ class RasterParams:
     @property
     def root(self):
         return self._root
+
+    @property
+    def name(self):
+        return f"{self.channel}_{self.exposure}"
 
     def update_channel(self, new_channel):
         self._channel = new_channel
@@ -328,7 +340,7 @@ class Raster(ABC):
         TODO: Implement 'overlap' method
 
         Arguments:
-            (str) method: stitch method ('cut' | 'overlap')
+            (str) method: stitch method ('cut' | 'overlap' | 'smart' | 'rescue')
 
         Returns:
             (np.ndarray) A stitched image array
@@ -338,12 +350,23 @@ class Raster(ABC):
         self.fetch_images()
         if method == "cut":
             return self.cut_stitch(plot)
+        elif method == "smart":
+            return self.smart_stitch()
         elif method == "overlap":
             return self.overlap_stitch()
+        elif method == "rescue":
+            return self.coordinate_stitch(plot)
         else:
             raise ValueError(
-                'Invalid stitch method. Valid methods are "cut" and "overlap"'
+                'Invalid stitch method. Valid methods are "cut", "smart", "overlap" and "rescue"'
             )
+
+    def smart_stitch(self):
+        """
+        Returns:
+            (np.ndarray) A stitched image array
+        """
+        raise NotImplementedError("Functionality not ready yet.")
 
     def cut_stitch(self, plot: bool):
         """
@@ -398,13 +421,9 @@ class Raster(ABC):
         arrangedTiles = np.reshape(
             tileArray, (self.params.dims[0], self.params.dims[1], retained, retained)
         )
-        if self.params.acqui_ori[
-            0
-        ]:  # If origin on right, flip horizontally (view returned)
+        if self.params.acqui_ori[0]:  # if origin on on right, flip horizontally (view returned)
             arrangedTiles = np.flip(arrangedTiles, 0)
-        if self.params.acqui_ori[
-            1
-        ]:  # If origin on bottom, flip vertically (view returned)
+        if self.params.acqui_ori[1]:  # If origin on bottom, flip vertically (view returned)
             arrangedTiles = np.flip(arrangedTiles, 1)
         rowsStitched = np.concatenate(arrangedTiles, axis=2)  # Stitch rows
         fullStitched = np.concatenate(rowsStitched, axis=0)  # Stitch cols
@@ -416,6 +435,179 @@ class Raster(ABC):
 
         """
         raise NotImplementedError("Overlap Stitch not yet implemented")
+
+    def coordinate_stitch(self, plot: bool = False):
+        """
+        Stitches a raster via stage coordinates from imaging.csv,
+        calibrating the pixel size dynamically using a single high-contrast boundary.
+        """
+        import pandas as pd
+        from skimage.registration import phase_cross_correlation
+
+        imsize = self.params.size
+        overlap = self.params.overlap
+        expected_overlap = int(imsize * overlap)
+
+        # Load images
+        tiles_list = self._images
+        if self.params.auto_ff and self.params.ff_type == "BaSiC":
+            tiles_list = self.ffCorrectedImages = self.applyFF_BaSiC(plot)
+
+        # Automatically locate imaging.csv
+        # Pulling image.csv from parents is a little yeehaw. Adjust in the future?
+        ref_path = pathlib.Path(self._image_refs[0])
+        csv_path = find_imaging_csv(ref_path)
+        csv_dir = csv_path.parent
+
+        df = pd.read_csv(csv_path)
+
+        # Map to absolute paths for robust matching
+        df['abs_path'] = df['image_path'].apply(lambda p: os.path.abspath(csv_dir / p))
+        ref_abs = [os.path.abspath(p) for p in self._image_refs]
+
+        df_matched = df[df['abs_path'].isin(ref_abs)].copy()
+        df_matched.set_index('abs_path', inplace=True)
+        df_matched = df_matched.reindex(ref_abs).reset_index()
+
+        cols_count = self.params.dims[0]
+        rows_count = self.params.dims[1]
+
+        # Reconstruct tiles dictionary and coordinates grid
+        tiles = {}
+        xs = np.zeros((cols_count, rows_count))
+        ys = np.zeros((cols_count, rows_count))
+        
+        for idx, row in df_matched.iterrows():
+            c, r = int(row['raster_col_index']), int(row['raster_row_index'])
+            tiles[(c, r)] = tiles_list[idx]
+            xs[c, r] = row['x']
+            ys[c, r] = row['y']
+
+        # Single boundary calibration
+        best_std = -1
+        best_boundary = None  # Will store (type, c, r, strip1, strip2, dx_stage)
+        
+        # 1. Search horizontal boundaries
+        for r in range(rows_count):
+            for c in range(cols_count - 1):
+                t1 = tiles[(c, r)].astype(float)
+                t2 = tiles[(c+1, r)].astype(float)
+                
+                crop_margin = int(imsize * 0.15)
+                strip1 = t1[crop_margin:-crop_margin, -expected_overlap:]
+                strip2 = t2[crop_margin:-crop_margin, :expected_overlap]
+                
+                std_val = (np.std(strip1) + np.std(strip2)) / 2
+                if std_val > best_std:
+                    best_std = std_val
+                    dx_stage = abs(xs[c+1, r] - xs[c, r])
+                    best_boundary = ('H', c, r, strip1, strip2, dx_stage)
+                    
+        # 2. Search vertical boundaries
+        for c in range(cols_count):
+            for r in range(rows_count - 1):
+                t1 = tiles[(c, r)].astype(float)
+                t2 = tiles[(c, r+1)].astype(float)
+                
+                crop_margin = int(imsize * 0.15)
+                strip1 = t1[-expected_overlap:, crop_margin:-crop_margin]
+                strip2 = t2[:expected_overlap, crop_margin:-crop_margin]
+                
+                std_val = (np.std(strip1) + np.std(strip2)) / 2
+                if std_val > best_std:
+                    best_std = std_val
+                    dy_stage = abs(ys[c, r+1] - ys[c, r])
+                    best_boundary = ('V', c, r, strip1, strip2, dy_stage)
+
+        pixel_size = None
+        if best_boundary is not None and expected_overlap > 0:
+            b_type, c, r, strip1, strip2, d_stage = best_boundary
+            try:
+                shift, error, diffphase = phase_cross_correlation(strip1, strip2, upsample_factor=1)
+                if b_type == 'H':
+                    d_pixel = (imsize - expected_overlap) + shift[1]
+                else:
+                    d_pixel = (imsize - expected_overlap) + shift[0]
+                
+                cand = d_stage / abs(d_pixel)
+                if 3.0 < cand < 3.5:
+                    pixel_size = cand
+            except Exception:
+                pass
+
+        if pixel_size is None:
+            raise ValueError(f"Could not dynamically assign pixel size for {self.params.name}. ")
+        else:
+            print(f"Dynamic pixel size assignment for {self.params.name}: {pixel_size}")
+
+        # Determine signs based on acquisition origin
+        sign_x = -1 if self.params.acqui_ori[0] else 1
+        sign_y = -1 if self.params.acqui_ori[1] else 1
+
+        # Calculate pixel coordinates
+        u = sign_x * xs / pixel_size
+        v = sign_y * ys / pixel_size
+
+        u_min = np.min(u)
+        v_min = np.min(v)
+
+        u_offsets = u - u_min
+        v_offsets = v - v_min
+
+        canvas_w = int(np.round(np.max(u_offsets))) + imsize
+        canvas_h = int(np.round(np.max(v_offsets))) + imsize
+
+        canvas = np.zeros((canvas_h, canvas_w), dtype=tiles_list[0].dtype)
+
+        # Initialize crop arrays
+        trim_left = np.zeros((cols_count, rows_count), dtype=int)
+        trim_right = np.zeros((cols_count, rows_count), dtype=int)
+        trim_top = np.zeros((cols_count, rows_count), dtype=int)
+        trim_bottom = np.zeros((cols_count, rows_count), dtype=int)
+
+        # Calculate horizontal trims
+        for r in range(rows_count):
+            for c in range(cols_count - 1):
+                ol = imsize - abs(u_offsets[c+1, r] - u_offsets[c, r])
+                if ol > 0:
+                    trim_amount = max(0, int(np.round(ol / 2)) - 1)
+                    if u_offsets[c, r] < u_offsets[c+1, r]:
+                        trim_right[c, r] = trim_amount
+                        trim_left[c+1, r] = trim_amount
+                    else:
+                        trim_left[c, r] = trim_amount
+                        trim_right[c+1, r] = trim_amount
+
+        # Calculate vertical trims
+        for c in range(cols_count):
+            for r in range(rows_count - 1):
+                ol = imsize - abs(v_offsets[c, r+1] - v_offsets[c, r])
+                if ol > 0:
+                    trim_amount = max(0, int(np.round(ol / 2)) - 1)
+                    if v_offsets[c, r] < v_offsets[c, r+1]:
+                        trim_bottom[c, r] = trim_amount
+                        trim_top[c, r+1] = trim_amount
+                    else:
+                        trim_top[c, r] = trim_amount
+                        trim_bottom[c, r+1] = trim_amount
+
+        # Paste tiles
+        for c in range(cols_count):
+            for r in range(rows_count):
+                u0 = int(np.round(u_offsets[c, r]))
+                v0 = int(np.round(v_offsets[c, r]))
+
+                t_l = max(0, min(imsize // 2, trim_left[c, r]))
+                t_r = max(0, min(imsize // 2, trim_right[c, r]))
+                t_t = max(0, min(imsize // 2, trim_top[c, r]))
+                t_b = max(0, min(imsize // 2, trim_bottom[c, r]))
+
+                tile = tiles[(c, r)]
+                cropped = tile[t_t : imsize - t_b, t_l : imsize - t_r]
+
+                canvas[v0 + t_t : v0 + imsize - t_b, u0 + t_l : u0 + imsize - t_r] = cropped
+
+        return canvas
 
     def export_stitch(
         self, method="cut", out_path_name="StitchedImages", manual_target=None
