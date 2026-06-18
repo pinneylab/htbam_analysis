@@ -16,6 +16,9 @@ from tqdm import tqdm
 from skimage import io, filters, transform
 from pathlib import Path
 from typing import Tuple, Union, List, Optional
+import matplotlib.pyplot as plt
+import warnings
+import fnmatch
 
 # load config with defaults, if exists
 config_path = Path(__file__).parent / "config.yaml"
@@ -24,7 +27,7 @@ if config_path.exists():
         config = yaml.safe_load(f)
 
 
-def _get_grid_angle(image_path: Path) -> float:
+def _get_grid_angle(image_path: Path, debug=False) -> float:
     """Helper function to find the grid rotation angle of a single raw image."""
     img = io.imread(image_path)
     
@@ -36,26 +39,76 @@ def _get_grid_angle(image_path: Path) -> float:
     crop = crop.astype(float)
     ptp = crop.max() - crop.min()
     
-    if ptp < 10:
+    if ptp < 1000:
         raise ValueError("Image lacks sufficient contrast/features (basically flat)")
         
+    # make a plot of the raw crop
+    if debug:
+        plt.figure()
+        plt.imshow(crop)
+        plt.title("Raw Crop")
+        plt.show()
+    
     crop = (crop - crop.min()) / ptp
         
-    # Edge detection
+    ## We can consider doing edge detection on smoothed crop to suppress high-frequency noise
+    ## Instead, to filter out images that are nearly all noise, we're requiring an absolute contrast of 1000 above.
+    #blurred = filters.gaussian(crop, sigma=5.0)
+    #edges = filters.sobel(blurred)
     edges = filters.sobel(crop)
+
+    # make a plot of the edges
+    if debug:
+        plt.figure()
+        plt.imshow(edges)
+        plt.title("Edges")
+        plt.show()
+
+    # Does our image have structured edges? Or is it mostly featureless/noise?
+    # Here, we check that at least 1% of the image has edges
+    if np.mean(edges > 0.05) < 0.01:
+        raise ValueError("No edges detected in image")
     
     # Test angles from -5 to 5 degrees
     angles = np.linspace(-5, 5, 200, endpoint=False)
-    sinogram = transform.radon(edges, theta=angles, circle=True)
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", 
+            category=UserWarning, 
+            message="Radon transform: image must be zero outside the reconstruction circle"
+        )
+        sinogram = transform.radon(edges, theta=angles, circle=True)
     
     variances = np.var(sinogram, axis=0)
+
+    # # Plot sinogram:
+    # if debug:
+    #     plt.figure()
+    #     plt.imshow(sinogram, extent=[angles.min(), angles.max(), 0, sinogram.shape[0]], aspect="auto")
+    #     plt.title("Sinogram")
+    #     plt.xlabel("Angle (degrees)")
+    #     plt.ylabel("Projection")
+    #     plt.show()
     
     # Check if a clear dominant grid line angle was found
     peak_prominence = np.max(variances) / (np.median(variances) + 1e-8)
     if peak_prominence < 1.1:
         raise ValueError(f"No distinct grid angle detected (prominence: {peak_prominence:.3f})")
+
+    # Make a plot of prominance vs angle
+    if debug:
+        plt.figure()
+        plt.plot(angles, variances)
+        plt.xlabel("Angle (degrees)")
+        plt.ylabel("Prominence")
+        plt.title("Prominence vs Angle")
+        plt.show()
         
     best_angle = angles[np.argmax(variances)]
+
+    if best_angle < -4.9 or best_angle > 4.9:
+        raise ValueError(f"Failed to find a valid rotation angle between -5, 5 degrees. This could be because the real rotation is too large, or because auto-rotation finding failed on your images.")
     
     # Return negative angle because of rotation sign convention
     return -best_angle
@@ -65,6 +118,7 @@ def stitch_single_raster(
     raster: List[Path],
     raster_params: rastering.RasterParams,
     stitched_image_path: Path,
+    method: str = "cut",
 ) -> Tuple[bool, Path, str]:
     """
     Process a single raster group (directory + list of image paths).
@@ -84,7 +138,7 @@ def stitch_single_raster(
         image_refs=raster,
         params=raster_params
     )
-    stitched_image = raster_obj.stitch()
+    stitched_image = raster_obj.stitch(method=method)
     
     # Save the stitched image
     io.imsave(stitched_image_path, stitched_image, check_contrast=False)#, plugin="tifffile"
@@ -173,7 +227,12 @@ class ImageStitcher:
             
         return float(np.median(angles))
 
-    def stitch_images(self, rotation: Optional[float] = None, acqui_origin: Tuple[bool] = (True, False)):
+    def stitch_images(self, 
+        rotation: Optional[float] = None, 
+        get_rotation_from: str = '*', 
+        acqui_origin: Tuple[bool] = (True, False),
+        method: str = "cut"
+    ):
 
         assert isinstance(self.raster_data, pd.DataFrame), 'Raster data has not been set.'
 
@@ -185,25 +244,25 @@ class ImageStitcher:
         grouped = self.raster_data.groupby('image_path_parent')
 
         if rotation is None:
-
-            # first get default config rotation, if exists
-            rotation = config.get('setups', {}).get(self.setup, {}).get('rotation', None)
-
-            if rotation:
-                print(f"Using default rotation: {rotation:.3f} degrees from config.yaml")
-
-            else:
-                for group_path in grouped.groups.keys():
-                    print(f"Auto-detecting optimal rotation from raster: {group_path}")
-                    try:
-                        rotation = self.find_optimal_rotation(group_path)
-                        print(f"Using optimal rotation: {rotation:.3f} degrees from {group_path}")
-                        break
-                    except ValueError as e:
-                        print(f"Warning: {e}. Trying next raster group...")
-                
-                if rotation is None:
-                    raise ValueError("Failed to auto-detect rotation from any raster group. \n You may want to manually provide a rotation angle by setting the 'rotation' parameter in stitch_images().")
+            matched_group_paths = [
+                gp for gp in grouped.groups.keys()
+                if fnmatch.fnmatch(gp.name, get_rotation_from) or 
+                   fnmatch.fnmatch(str(gp.relative_to(self._raw_images_path)), get_rotation_from)
+            ]
+            if not matched_group_paths:
+                raise ValueError(f"No raster groups matched the pattern '{get_rotation_from}'. Available groups: {[gp.name for gp in grouped.groups.keys()]}")
+            
+            for group_path in matched_group_paths:
+                print(f"Auto-detecting optimal rotation from raster: {group_path}")
+                try:
+                    rotation = self.find_optimal_rotation(group_path)
+                    print(f"Using optimal rotation: {rotation:.3f} degrees from {group_path}")
+                    break
+                except ValueError as e:
+                    print(f"Warning: {e}. Trying next raster group...")
+            
+            if rotation is None:
+                raise ValueError(f"Failed to auto-detect rotation from any matching raster group (pattern: '{get_rotation_from}'). \n You may want to manually provide a rotation angle by setting the 'rotation' parameter in stitch_images().")
 
         success_counter = 0
         for image_parent, df in tqdm(grouped, desc='Stitching images.'):
@@ -218,7 +277,7 @@ class ImageStitcher:
                 width, height = int(width), int(height)
                 raster = df['image_path'].to_list()
                 params = rastering.RasterParams(overlap, size=SIZE, acqui_ori=acqui_origin, rotation=rotation, dims=(width, height), auto_ff=ff_correction, ff_type='BaSiC') 
-                stitch_single_raster(raster, params, outpath)
+                stitch_single_raster(raster, params, outpath, method=method)
 
                 # carry over metadata
                 row = df.drop_duplicates(subset=['image_path_parent']).drop(columns=raster_headers)
