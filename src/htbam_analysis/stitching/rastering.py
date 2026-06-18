@@ -440,6 +440,11 @@ class Raster(ABC):
         """
         Stitches a raster via stage coordinates from imaging.csv,
         calibrating the pixel size dynamically using a single high-contrast boundary.
+        Used primarily for "rescuing" stitched images with poor overlap,
+        do to settings or microscope stage errors.
+
+        Returns:
+            (np.ndarray) A stitched image array
         """
         import pandas as pd
         from skimage.registration import phase_cross_correlation
