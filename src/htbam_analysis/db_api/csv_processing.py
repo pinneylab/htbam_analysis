@@ -17,6 +17,10 @@ CSV_DATA_LABELS = {
     'button_quant_sum': 'summed_button_BGsub_Button_Quant',
     'standardcurve_concentration': 'concentration_', # We'll add the units (usually uM) later, so it looks like 'concentration_uM'.
                                                      # We need this here because on the microscope, the concentration is named differently for standard experiments. We should change it to be uniform.
+    'binding_signal': 'summed_button_BGsub',
+    'binding_image_type': 'binding_image_type',
+    'post_wash_prey_type': 'post_wash_prey',
+    'post_wash_bait_type': 'post_wash_bait',
 }
 
 def process_dataframe_kinetics(df, time_unit: pint.Unit, conc_unit: pint.Unit):
@@ -98,12 +102,98 @@ def process_dataframe_kinetics(df, time_unit: pint.Unit, conc_unit: pint.Unit):
 
     return data_4d
 
-def process_dataframe_binding(self, df):
+def process_dataframe_binding(
+    df,
+    time_unit: pint.Unit,
+    conc_unit: pint.Unit,
+    signal_col: str = None,
+    image_type_col: str = None,
+    post_wash_prey_type: str = None,
+    post_wash_bait_type: str = None,
+):
     '''
-    Turn a pre-processed experiment dataframe, and create a dict of numpy arrays in the 'binding' format.
-    TODO: Not implemented.
+    Turn a long-format binding dataframe into a Data3D object.
+
+    Expects one row per chamber/concentration/image-type with button signal in
+    `signal_col` and image label in `image_type_col`. Pivots post-wash prey and
+    bait rows, then computes fluorescence_ratio = post_wash_prey / post_wash_bait.
     '''
-    pass
+    L = copy(CSV_DATA_LABELS)
+    signal_col = signal_col or L['binding_signal']
+    image_type_col = image_type_col or L['binding_image_type']
+    post_wash_prey_type = post_wash_prey_type or L['post_wash_prey_type']
+    post_wash_bait_type = post_wash_bait_type or L['post_wash_bait_type']
+
+    if signal_col not in df.columns:
+        raise ValueError(f"Signal column '{signal_col}' not found in binding dataframe.")
+    if image_type_col not in df.columns:
+        raise ValueError(f"Image type column '{image_type_col}' not found in binding dataframe.")
+
+    L['concentration'] = 'concentration'
+
+    required_types = {post_wash_prey_type, post_wash_bait_type}
+    present_types = set(df[image_type_col].dropna().unique())
+    missing_types = required_types - present_types
+    if missing_types:
+        raise ValueError(
+            f"Binding dataframe missing required image types: {sorted(missing_types)}. "
+            f"Found: {sorted(present_types)}"
+        )
+
+    subset = df[df[image_type_col].isin(required_types)].copy()
+    wide = subset.pivot_table(
+        index=[L['chamber_IDs'], L['concentration'], L['sample_IDs']],
+        columns=image_type_col,
+        values=signal_col,
+        aggfunc='first',
+    ).reset_index()
+    wide.columns.name = None
+
+    chamber_ids = wide[L["chamber_IDs"]].unique()
+    chamber_to_sample_map = wide.set_index(L["chamber_IDs"])[L['sample_IDs']].to_dict()
+    sample_ids = np.array([chamber_to_sample_map[chamber] for chamber in chamber_ids])
+
+    if L['button_quant_sum'] in df.columns:
+        bq_subset = df.drop_duplicates(subset=[L['chamber_IDs']], keep='first')
+        chamber_to_button_quant_map = bq_subset.set_index(L["chamber_IDs"])[L['button_quant_sum']].to_dict()
+        button_quant = np.array([chamber_to_button_quant_map.get(chamber, np.nan) for chamber in chamber_ids])
+    else:
+        button_quant = np.nan * np.ones(len(chamber_ids))
+
+    concentrations = wide[L['concentration']].unique()
+
+    ratio_list_by_conc = []
+    for concentration in concentrations:
+        rows = wide[wide[L['concentration']] == concentration]
+        prey_vals = rows[post_wash_prey_type].to_numpy(dtype=float)
+        bait_vals = rows[post_wash_bait_type].to_numpy(dtype=float)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratios = np.where(bait_vals == 0, np.nan, prey_vals / bait_vals)
+        ratio_list_by_conc.append(ratios)
+
+    ratio_array = np.array(ratio_list_by_conc)[..., np.newaxis]
+
+    concentrations = concentrations * conc_unit
+    button_quant = button_quant * units.RFU
+
+    from htbam_analysis.db_api.data import Data3D, IndepVars, Meta
+    indep_vars = IndepVars(
+        concentrations,
+        chamber_ids,
+        sample_ids,
+        button_quant,
+        np.empty((0, 0)) * time_unit,
+    )
+    meta = Meta()
+    data_3d = Data3D(
+        indep_vars=indep_vars,
+        meta=meta,
+        dep_var=ratio_array,
+        dep_var_type=['fluorescence_ratio'],
+        dep_var_units=[units.dimensionless],
+    )
+
+    return data_3d
 
 def parse_concentration(conc_str: str, unit: pint.Unit) -> float:
     '''
