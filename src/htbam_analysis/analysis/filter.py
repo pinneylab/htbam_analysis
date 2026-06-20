@@ -2,7 +2,7 @@ import time
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from copy import deepcopy
-from typing import List, Dict
+from typing import List, Dict, Union
 from htbam_analysis.db_api.data import Data4D, Data3D, Data2D, Meta
 from htbam_analysis.db_api.units import units
 
@@ -299,23 +299,66 @@ def filter_initial_rates_positive_cutoff(initial_rate_data: Data3D):
         meta=metadata,
     )
 
-def filter_expression_cutoff(expression_data: Data2D, initial_rate_data: Data3D, expression_cutoff: float):
+def filter_fluorescence_ratio(binding_data: Data3D, min_ratio: float = 0.0, max_ratio: float = 10.0):
     """
-    Filter initial rates based on expression threshold using Data2D and Data3D.
+    Filter binding data for reasonable fluorescence ratios using Data3D.
+
+    Returns a per-concentration mask that is True where fluorescence_ratio is between min_ratio and max_ratio,
+    for use before isotherm fitting (e.g. via Experiment.apply_mask).
     """
-    assert isinstance(expression_data, Data2D), "expression_data must be Data2D."
-    assert isinstance(initial_rate_data, Data3D), "initial_rate_data must be Data3D."
-    conc_idx = expression_data.dep_var_type.index("concentration")
-    expr_vals = expression_data.dep_var[..., conc_idx]           # (n_chambers,)
-    mask1 = expr_vals >= expression_cutoff
-    n_conc, n_chamb = initial_rate_data.dep_var.shape[:2]
-    mask = np.expand_dims(np.tile(mask1, (n_conc, 1)), axis=-1)  # (n_conc, n_chambers, 1)
-    metadata = Meta(mask_type="expression_cutoff", mask_cutoff=expression_cutoff)
+    assert isinstance(binding_data, Data3D), "binding_data must be Data3D."
+    ratio_idx = binding_data.dep_var_type.index("fluorescence_ratio")
+    ratios = binding_data.dep_var[..., ratio_idx]                # (n_conc, n_chambers)
+    mask = (ratios >= min_ratio) & (ratios <= max_ratio)
+    mask = np.expand_dims(mask, axis=-1)                         # (n_conc, n_chambers, 1)
+    metadata = Meta(mask_type="fluorescence_ratio_cutoff", mask_cutoff=(min_ratio, max_ratio))
     return Data3D(
-        indep_vars=initial_rate_data.indep_vars,
+        indep_vars=binding_data.indep_vars,
         dep_var=mask,
         dep_var_type=["mask"],
-        dep_var_units=[units.dimensionless], # Boolean masks are dimensionless
+        dep_var_units=[units.dimensionless],
+        meta=metadata,
+    )
+
+def filter_expression_cutoff(
+    expression_data: Data2D,
+    run_data: Union[Data3D, Data4D],
+    expression_cutoff: float,
+):
+    """
+    Filter run data based on per-chamber expression threshold.
+
+    Works with Data3D (e.g. initial rates or binding) or Data4D (e.g. kinetics).
+    The mask is True for chambers meeting the cutoff and is broadcast across all
+    concentrations (and timepoints for Data4D).
+    """
+    assert isinstance(expression_data, Data2D), "expression_data must be Data2D."
+    assert isinstance(run_data, (Data3D, Data4D)), "run_data must be Data3D or Data4D."
+    conc_idx = expression_data.dep_var_type.index("concentration")
+    expr_vals = expression_data.dep_var[..., conc_idx]           # (n_chambers,)
+    chamber_mask = expr_vals >= expression_cutoff                # (n_chambers,)
+
+    metadata = Meta(mask_type="expression_cutoff", mask_cutoff=expression_cutoff)
+
+    if isinstance(run_data, Data4D):
+        n_conc, n_time, n_chamb = run_data.dep_var.shape[:3]
+        mask = np.tile(chamber_mask, (n_conc, n_time, 1))      # (n_conc, n_time, n_chambers)
+        mask = np.expand_dims(mask, axis=-1)                     # (n_conc, n_time, n_chambers, 1)
+        return Data4D(
+            indep_vars=run_data.indep_vars,
+            dep_var=mask,
+            dep_var_type=["mask"],
+            dep_var_units=[units.dimensionless],
+            meta=metadata,
+        )
+
+    n_conc, n_chamb = run_data.dep_var.shape[:2]
+    mask = np.expand_dims(np.tile(chamber_mask, (n_conc, 1)), axis=-1)  # (n_conc, n_chambers, 1)
+    return Data3D(
+        indep_vars=run_data.indep_vars,
+        dep_var=mask,
+        dep_var_type=["mask"],
+        dep_var_units=[units.dimensionless],
         meta=metadata,
     )
 

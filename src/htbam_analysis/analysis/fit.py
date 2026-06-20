@@ -77,6 +77,31 @@ def inhibition_model(x, r_max, r_min, ic50):
     """
     return r_min + (r_max - r_min) / (1 + (x / ic50))
 
+# Binding isotherm (2-parameter hyperbolic saturation):
+@set_units(x=ureg.uM,
+            r_max=ureg.dimensionless,
+            Kd=ureg.uM,
+            y=ureg.dimensionless)
+def binding_isotherm_model(x, r_max, Kd):
+    """
+    Binding isotherm model: r_max * x / (Kd + x).
+
+    Parameters
+    ----------
+    x : array-like
+        Ligand concentration.
+    r_max : float
+        Maximum response at saturation.
+    Kd : float
+        Dissociation constant.
+
+    Returns
+    -------
+    array-like
+        Response at each ligand concentration.
+    """
+    return r_max * x / (Kd + x)
+
 
 ### Fitting functions for DB objects:
 ### N.B. This version is deprecated. 
@@ -822,4 +847,224 @@ def fit_nonlinear_models(
         'y_pred': Y_pred,
         'r_squared': r_squared
     }
+
+
+def _resolve_binder_indices(chamber_ids, sample_ids, binder_ids):
+    """Map identifier strings to chamber indices (chamber ID first, then sample ID)."""
+    indices = []
+    for ident in binder_ids:
+        chamb_matches = np.where(chamber_ids == ident)[0]
+        if len(chamb_matches) > 0:
+            indices.extend(chamb_matches.tolist())
+            continue
+        sample_matches = np.where(sample_ids == ident)[0]
+        if len(sample_matches) > 0:
+            indices.extend(sample_matches.tolist())
+    return np.unique(indices)
+
+
+def _apply_concentrations_to_fit_mask(concs, concentrations_to_fit, n_chamb):
+    """Build (n_conc, n_chamb) boolean mask from concentrations_to_fit dict."""
+    if concentrations_to_fit is None:
+        if hasattr(concs, 'magnitude'):
+            n_conc = len(concs.magnitude)
+        else:
+            n_conc = len(concs)
+        return np.ones((n_conc, n_chamb), dtype=bool)
+
+    if not isinstance(concentrations_to_fit, dict):
+        raise TypeError("concentrations_to_fit must be a dict mapping concentration -> bool")
+
+    if hasattr(concs, 'magnitude'):
+        conc_vals = concs.magnitude
+    else:
+        conc_vals = np.asarray(concs, dtype=float)
+
+    missing = [float(c) for c in conc_vals if float(c) not in map(float, concentrations_to_fit.keys())]
+    if missing:
+        raise KeyError(f"concentrations_to_fit missing concentrations: {missing}")
+
+    fit_mask = np.zeros((len(conc_vals), n_chamb), dtype=bool)
+    for i, c in enumerate(conc_vals):
+        fit_mask[i, :] = bool(concentrations_to_fit[float(c)])
+    return fit_mask
+
+
+def _make_binding_isotherm_fixed_rmax_model(r_max_fixed):
+    @set_units(x=ureg.uM, Kd=ureg.uM, y=ureg.dimensionless)
+    def model(x, Kd):
+        return binding_isotherm_model(x, r_max_fixed, Kd)
+    return model
+
+
+def fit_binding_isotherm(
+    data: Data3D,
+    *,
+    bounds=(-np.inf, np.inf),
+    maxfev: int = 10000,
+    p0: List[float] = None,
+    tight_binder_ids: List[str] = None,
+    r_max_fixed: float = None,
+    concentrations_to_fit: dict = None,
+) -> Tuple[Data2D, Data3D, Data3D]:
+    """
+    Fit binding_isotherm_model to fluorescence_ratio vs ligand concentration per chamber.
+
+    Parameters
+    ----------
+    data : Data3D
+        Binding data with dep_var_type containing 'fluorescence_ratio'.
+    tight_binder_ids : list of str, optional
+        Chamber or sample identifiers for tight binders. When provided, r_max is
+        estimated from these chambers and fixed when fitting the rest (unless
+        r_max_fixed is also provided).
+    r_max_fixed : float, optional
+        User-defined r_max to fix when fitting Kd. If tight_binder_ids is also
+        provided, tight-binder chambers receive a full 2-parameter fit while all
+        other chambers use r_max_fixed. If only r_max_fixed is provided, all
+        chambers are fit with fixed r_max.
+    concentrations_to_fit : dict, optional
+        Mapping concentration -> bool indicating whether each concentration is
+        included in the fit.
+
+    Returns
+    -------
+    params_data : Data2D
+        Per-chamber fitted r_max, Kd, r_squared.
+    ypred_data : Data3D
+        Predicted fluorescence_ratio at each concentration.
+    fit_points_mask : Data3D
+        Boolean mask of points used in the fit.
+    """
+    assert isinstance(data, Data3D), "data must be Data3D."
+    start = time.time()
+
+    ratio_idx = data.dep_var_type.index("fluorescence_ratio")
+    Y_unit = data.dep_var_units[ratio_idx]
+    Y = data.dep_var[..., ratio_idx] * Y_unit  # (n_conc, n_chamb)
+
+    X = data.indep_vars.concentration
+    n_conc, n_chamb = Y.shape
+
+    conc_fit_mask = _apply_concentrations_to_fit_mask(
+        X, concentrations_to_fit, n_chamb
+    )
+    Y_mag = Y.magnitude if hasattr(Y, 'magnitude') else np.asarray(Y, dtype=float)
+    Y_fit = np.where(conc_fit_mask, Y_mag, np.nan)
+    if hasattr(Y, 'units'):
+        Y_fit = Y_fit * Y.units
+
+    num_params = 2
+    params_arr = np.full((n_chamb, num_params), np.nan)
+    r_squared = np.full((n_chamb,), np.nan)
+    Y_pred = np.full((n_conc, n_chamb), np.nan)
+
+    if p0 is None:
+        p0_full = [1.0, 1.0]
+    else:
+        p0_full = list(p0)
+
+    X_for_fit = X
+
+    def _fit_one_chamber(y_col, model_func, p0_local, bounds_local):
+        results = fit_nonlinear_models(
+            X_for_fit,
+            y_col.reshape(-1, 1),
+            model_func,
+            p0=p0_local,
+            bounds=bounds_local,
+            maxfev=maxfev,
+        )
+        if np.isnan(results['params'][0]).any():
+            return None
+        return results
+
+    def _fit_fixed_rmax_chambers(chamber_indices, r_max_value):
+        fixed_model = _make_binding_isotherm_fixed_rmax_model(r_max_value)
+        p0_kd = [p0_full[1]] if len(p0_full) > 1 else [1.0]
+        for j in chamber_indices:
+            res = _fit_one_chamber(Y_fit[:, j], fixed_model, p0_kd, bounds)
+            if res is None:
+                continue
+            params_arr[j, 0] = r_max_value
+            params_arr[j, 1] = res['params'][0, 0]
+            r_squared[j] = res['r_squared'][0]
+            Y_pred[:, j] = res['y_pred'][:, 0]
+
+    if r_max_fixed is not None:
+        if not np.isfinite(r_max_fixed) or r_max_fixed <= 0:
+            raise ValueError(f"r_max_fixed must be a positive finite number, got {r_max_fixed}")
+
+    if tight_binder_ids:
+        tight_indices = _resolve_binder_indices(
+            data.indep_vars.chamber_IDs,
+            data.indep_vars.sample_IDs,
+            tight_binder_ids,
+        )
+        if len(tight_indices) == 0:
+            raise ValueError(f"No chambers matched tight_binder_ids: {tight_binder_ids}")
+
+        tight_rmax_vals = []
+        for j in tight_indices:
+            res = _fit_one_chamber(Y_fit[:, j], binding_isotherm_model, p0_full, bounds)
+            if res is None:
+                continue
+            params_arr[j] = res['params'][0]
+            r_squared[j] = res['r_squared'][0]
+            Y_pred[:, j] = res['y_pred'][:, 0]
+            tight_rmax_vals.append(res['params'][0, 0])
+
+        if r_max_fixed is not None:
+            r_max_anchor = float(r_max_fixed)
+        else:
+            if len(tight_rmax_vals) == 0:
+                raise ValueError("Could not fit any tight-binder chambers to estimate r_max.")
+            r_max_anchor = float(np.nanmean(tight_rmax_vals))
+
+        other_indices = [j for j in range(n_chamb) if j not in tight_indices]
+        _fit_fixed_rmax_chambers(other_indices, r_max_anchor)
+    elif r_max_fixed is not None:
+        _fit_fixed_rmax_chambers(range(n_chamb), float(r_max_fixed))
+    else:
+        results = fit_nonlinear_models(
+            X_for_fit,
+            Y_fit,
+            binding_isotherm_model,
+            p0=p0_full,
+            bounds=bounds,
+            maxfev=maxfev,
+        )
+        params_arr = results['params']
+        r_squared = results['r_squared']
+        Y_pred = results['y_pred']
+
+    param_names = ['r_max', 'Kd']
+    param_unit_objs = [ureg.dimensionless, ureg.uM]
+    dep2d = np.concatenate([params_arr, r_squared[:, None]], axis=1)
+    names2d = param_names + ['r_squared']
+    params_data = Data2D(
+        indep_vars=deepcopy(data.indep_vars),
+        dep_var=dep2d,
+        dep_var_type=names2d,
+        dep_var_units=param_unit_objs + [ureg.dimensionless],
+        meta=Meta(fit_type='binding_isotherm_model'),
+    )
+
+    pred3d = Y_pred.reshape(n_conc, n_chamb, 1)
+    ypred_data = Data3D(
+        indep_vars=deepcopy(data.indep_vars),
+        dep_var=pred3d,
+        dep_var_type=['y_pred'],
+        dep_var_units=[Y_unit],
+        meta=Meta(fit_type='binding_isotherm_model'),
+    )
+
+    raw_fit_mask = conc_fit_mask[..., np.newaxis]
+    fit_points_mask = make_custom_mask(data, raw_fit_mask, info='points chosen for binding isotherm fit')
+
+    num_successful = np.sum(~np.isnan(params_arr).any(axis=1))
+    print(f'Successfully fit binding isotherm for {num_successful} wells.')
+    print('Elapsed', np.round(time.time() - start, 3), 'seconds.')
+
+    return params_data, ypred_data, fit_points_mask
 

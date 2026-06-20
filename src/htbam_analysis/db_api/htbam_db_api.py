@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod, abstractproperty
 from htbam_analysis.db_api.data import Data2D, Data3D, Data4D, Meta
 import pandas as pd
-from typing import List, Tuple
+from typing import List, Literal, Optional, Tuple
 import numpy as np
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from copy import deepcopy
 import pint
 
 from htbam_analysis.db_api.exceptions import HtbamDBException
-from htbam_analysis.db_api.io import verify_file_exists, load_run_from_csv
+from htbam_analysis.db_api.io import verify_file_exists, load_run_from_csv, load_button_quant_from_csv
 from htbam_analysis.db_api.units import units
 
 class AbstractHtbamDBAPI(ABC):
@@ -30,36 +30,96 @@ class AbstractHtbamDBAPI(ABC):
     #     raise NotImplementedError
 
 class LocalHtbamDBAPI(AbstractHtbamDBAPI):
-   
 
-    def __init__(self, standard_curve_data_path: str, standard_name: str, standard_substrate: str, standard_units: pint.Unit, standard_concentration_col: str,
-                  kinetic_data_path: str, kinetic_name: str, kinetic_substrate: str, kinetic_units: pint.Unit, kinetic_concentration_col: str, time_units: pint.Unit, button_quant_data_path: str):
+    def __init__(
+        self,
+        standard_curve_data_path: Optional[str] = None,
+        standard_name: Optional[str] = None,
+        standard_substrate: Optional[str] = None,
+        standard_units: Optional[pint.Unit] = None,
+        standard_concentration_col: Optional[str] = None,
+        kinetic_data_path: Optional[str] = None,
+        kinetic_name: Optional[str] = None,
+        kinetic_substrate: Optional[str] = None,
+        kinetic_units: Optional[pint.Unit] = None,
+        kinetic_concentration_col: Optional[str] = None,
+        time_units: Optional[pint.Unit] = None,
+        button_quant_data_path: Optional[str] = None,
+    ):
         super().__init__()
-
-        # Verify that the files exist
-        verify_file_exists(standard_curve_data_path)
-        verify_file_exists(kinetic_data_path)
-        verify_file_exists(button_quant_data_path)
-        
-        # The data is in format 'kinetics' for both standard curve and kinetics.
-        from htbam_analysis.db_api.io import load_button_quant_from_csv
-        standard_data = load_run_from_csv(standard_curve_data_path, 'kinetics', standard_units, time_units, standard_concentration_col)
-        kinetics_data = load_run_from_csv(kinetic_data_path, 'kinetics', kinetic_units, time_units, kinetic_concentration_col)
-        button_quant_data = load_button_quant_from_csv(button_quant_data_path)
-        
         self._init_json_dict()
 
-        # Populate with metadata, which was stored in the kinetics dataframe
-        # TODO: I think this is unused currently.
-        #self.set_metadata('chamber_IDs', kinetics_data['indep_vars']['chamber_IDs'])
-        #self.set_metadata('sample_IDs', kinetics_data['indep_vars']['sample_IDs'])
+        legacy_args = [
+            standard_curve_data_path, standard_name, standard_units, standard_concentration_col,
+            kinetic_data_path, kinetic_name, kinetic_units, kinetic_concentration_col,
+            time_units, button_quant_data_path,
+        ]
+        if any(arg is not None for arg in legacy_args):
+            if not all(arg is not None for arg in legacy_args):
+                raise HtbamDBException(
+                    "Legacy LocalHtbamDBAPI initialization requires all standard, kinetic, "
+                    "and button_quant arguments to be provided."
+                )
+            self.load_run(
+                standard_name,
+                standard_curve_data_path,
+                'kinetics',
+                conc_unit=standard_units,
+                time_unit=time_units,
+                concentration_col=standard_concentration_col,
+            )
+            self.load_run(
+                kinetic_name,
+                kinetic_data_path,
+                'kinetics',
+                conc_unit=kinetic_units,
+                time_unit=time_units,
+                concentration_col=kinetic_concentration_col,
+            )
+            self.load_run('button_quant', button_quant_data_path, 'button_quant')
 
-        self.add_run(standard_name, standard_data)
-        self.add_run(kinetic_name, kinetics_data)
-        self.add_run('button_quant', button_quant_data)
+    def load_run(
+        self,
+        run_name: str,
+        csv_path: str,
+        run_type: Literal["kinetics", "binding", "button_quant"],
+        *,
+        conc_unit: pint.Unit = None,
+        time_unit: pint.Unit = None,
+        concentration_col: str = None,
+        signal_col: str = None,
+        image_type_col: str = None,
+        post_wash_prey_type: str = None,
+        post_wash_bait_type: str = None,
+    ) -> None:
+        '''
+        Load a run from CSV and add it to the database.
+        '''
+        verify_file_exists(csv_path)
 
-        return
-    
+        if run_type in ('kinetics', 'binding'):
+            if conc_unit is None or time_unit is None or concentration_col is None:
+                raise HtbamDBException(
+                    f"run_type '{run_type}' requires conc_unit, time_unit, and concentration_col."
+                )
+            run_data = load_run_from_csv(
+                csv_path,
+                run_type,
+                conc_unit,
+                time_unit,
+                concentration_col,
+                signal_col=signal_col,
+                image_type_col=image_type_col,
+                post_wash_prey_type=post_wash_prey_type,
+                post_wash_bait_type=post_wash_bait_type,
+            )
+        elif run_type == 'button_quant':
+            run_data = load_button_quant_from_csv(csv_path)
+        else:
+            raise HtbamDBException(f"Unknown run_type '{run_type}'.")
+
+        self.add_run(run_name, run_data)
+
 
     def _init_json_dict(self) -> None:
         '''

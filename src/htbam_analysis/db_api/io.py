@@ -1,10 +1,11 @@
 from htbam_analysis.db_api.exceptions import HtbamDBException
 from htbam_analysis.db_api.csv_processing import CSV_DATA_LABELS, parse_concentration
 from htbam_analysis.db_api.csv_processing import process_dataframe_kinetics, process_dataframe_binding
-from htbam_analysis.db_api.data import Data2D, Data3D, IndepVars, Meta
+from htbam_analysis.db_api.data import Data2D, Data3D, Data4D, IndepVars, Meta
 
 from pathlib import Path
 from copy import copy
+from typing import Union
 
 import pandas as pd
 import numpy as np
@@ -45,7 +46,18 @@ def verify_file_exists(file_path: str) -> None:
             raise HtbamDBException(f"File {file_path} does not exist. We found the parent file {parent_file} but it does not contain the file you requested.\n \
                                    We found the following files in the parent directory:\n" + "\n".join(parent_file_contents))
 
-def load_run_from_csv(csv_path: str, run_type:str, conc_unit: pint.Unit, time_unit: pint.Unit, concentration_col: str) -> Data3D:
+def load_run_from_csv(
+    csv_path: str,
+    run_type: str,
+    conc_unit: pint.Unit,
+    time_unit: pint.Unit,
+    concentration_col: str,
+    *,
+    signal_col: str = None,
+    image_type_col: str = None,
+    post_wash_prey_type: str = None,
+    post_wash_bait_type: str = None,
+) -> Union[Data3D, Data4D]:
     '''
     Loads a run from a CSV file, and processes it into a dict of numpy arrays.
 
@@ -98,8 +110,32 @@ def load_run_from_csv(csv_path: str, run_type:str, conc_unit: pint.Unit, time_un
         'binding':  process_dataframe_binding
     }
 
-    # Pass our dataframe into the function which will process into a dict of numpy arrays.
-    run_data = data_processing_functions[run_type](df, time_unit, conc_unit)
+    if run_type not in data_processing_functions:
+        raise HtbamDBException(f"Unknown run_type '{run_type}'. Expected one of {list(data_processing_functions.keys())}.")
+
+    if run_type == 'binding':
+        L_bind = copy(CSV_DATA_LABELS)
+        signal_col = signal_col or L_bind['binding_signal']
+        image_type_col = image_type_col or L_bind['binding_image_type']
+        if signal_col not in df.columns:
+            raise HtbamDBException(
+                f"Signal column '{signal_col}' not found in {csv_path}. Columns available: {df.columns.tolist()}"
+            )
+        if image_type_col not in df.columns:
+            raise HtbamDBException(
+                f"Image type column '{image_type_col}' not found in {csv_path}. Columns available: {df.columns.tolist()}"
+            )
+        run_data = process_dataframe_binding(
+            df,
+            time_unit,
+            conc_unit,
+            signal_col=signal_col,
+            image_type_col=image_type_col,
+            post_wash_prey_type=post_wash_prey_type,
+            post_wash_bait_type=post_wash_bait_type,
+        )
+    else:
+        run_data = data_processing_functions[run_type](df, time_unit, conc_unit)
 
     return run_data
 

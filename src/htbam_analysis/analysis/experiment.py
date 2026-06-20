@@ -15,7 +15,7 @@ import pandas as pd
 from htbam_analysis.db_api.htbam_db_api import AbstractHtbamDBAPI, HtbamDBException
 from htbam_analysis.db_api.data import Data4D, Data3D, Data2D, Meta
 from htbam_analysis.analysis.plot import plot_chip
-from htbam_analysis.analysis.fit import mm_model
+from htbam_analysis.analysis.fit import mm_model, binding_isotherm_model
 #from htbam_analysis.analysis.fit import fit_luminance_vs_time, fit_luminance_vs_concentration
 
 # Plotting
@@ -1239,6 +1239,525 @@ class HTBAMExperiment:
                 ax_mm.legend(fontsize=8)
 
             Path(export_dir).mkdir(parents=True, exist_ok=True)
+            out_path = Path(export_dir) / f"{sample}.pdf"
+            plt.savefig(out_path, dpi=dpi, bbox_inches='tight')
+            plt.close(fig)
+            tqdm.write(f"Saved {out_path}")
+
+    def export_binding_sample_data(
+        self,
+        run_name: str,
+        enzyme_concentration_run_name: str,
+        output_dir: str = None,
+        file_name: str = None,
+    ):
+        '''
+        Export per-sample binding isotherm fit data to a CSV file.
+        '''
+        run_data = self.get_run(run_name)
+        enzyme_concentration_data = self.get_run(enzyme_concentration_run_name)
+        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
+
+        if output_dir is None:
+            output_dir = os.getcwd()
+
+        sample_names = run_data.indep_vars.sample_IDs
+        unique_samples = np.unique(sample_names)
+
+        r_max_units = f"{run_data.dep_var_units[0]:~}"
+        kd_units = f"{run_data.dep_var_units[1]:~}"
+        E_units = f"{enzyme_concentration_data.dep_var_units[0]:~}"
+
+        df = pd.DataFrame(columns=[
+            'sample',
+            f'avg_r_max ({r_max_units})', f'std_r_max ({r_max_units})',
+            f'avg_Kd ({kd_units})', f'std_Kd ({kd_units})',
+            f'avg_E_conc ({E_units})', f'std_E_conc ({E_units})',
+            'avg_fit_R2', 'std_fit_R2',
+            'replicates', 'chamber_IDs',
+        ])
+
+        for sample in unique_samples:
+            sample_indices = np.where(sample_names == sample)[0]
+            sample_rmax = run_data.dep_var[..., 0][sample_indices]
+            sample_kd = run_data.dep_var[..., 1][sample_indices]
+            sample_r2 = run_data.dep_var[..., 2][sample_indices]
+            sample_E_conc = enzyme_concentration_data.dep_var[..., 0][sample_indices]
+            sample_chamber_IDs = run_data.indep_vars.chamber_IDs[sample_indices]
+
+            replicate_number = np.count_nonzero(~np.isnan(sample_kd))
+            nonnan_sample_chamber_IDs = sample_chamber_IDs[~np.isnan(sample_kd)]
+
+            if replicate_number > 0:
+                avg_rmax = np.nanmean(sample_rmax)
+                std_rmax = np.nanstd(sample_rmax)
+                avg_kd = np.nanmean(sample_kd)
+                std_kd = np.nanstd(sample_kd)
+                avg_E_conc = np.nanmean(sample_E_conc)
+                std_E_conc = np.nanstd(sample_E_conc)
+                avg_r2 = np.nanmean(sample_r2)
+                std_r2 = np.nanstd(sample_r2)
+            else:
+                avg_rmax = std_rmax = avg_kd = std_kd = avg_E_conc = std_E_conc = avg_r2 = std_r2 = np.nan
+
+            df = pd.concat([df, pd.DataFrame([{
+                'sample': sample,
+                f'avg_r_max ({r_max_units})': avg_rmax,
+                f'std_r_max ({r_max_units})': std_rmax,
+                f'avg_Kd ({kd_units})': avg_kd,
+                f'std_Kd ({kd_units})': std_kd,
+                f'avg_E_conc ({E_units})': avg_E_conc,
+                f'std_E_conc ({E_units})': std_E_conc,
+                'avg_fit_R2': avg_r2,
+                'std_fit_R2': std_r2,
+                'replicates': replicate_number,
+                'chamber_IDs': nonnan_sample_chamber_IDs,
+            }])], ignore_index=True)
+
+        if file_name is None:
+            file_name = f'{run_name}_sample_binding_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+        print(f"Sample binding data exported to {output_dir}/{file_name}")
+
+    def export_binding_chamber_data(
+        self,
+        run_name: str,
+        enzyme_concentration_run_name: str,
+        output_dir: str = None,
+        file_name: str = None,
+    ):
+        '''
+        Export per-chamber binding isotherm fit data to a CSV file.
+        '''
+        run_data = self.get_run(run_name)
+        enzyme_concentration_data = self.get_run(enzyme_concentration_run_name)
+        assert isinstance(run_data, Data2D), "run_data must be of type Data2D."
+
+        if output_dir is None:
+            output_dir = os.getcwd()
+
+        chamber_names = run_data.indep_vars.chamber_IDs
+        sample_names = run_data.indep_vars.sample_IDs
+
+        r_max_units = f"{run_data.dep_var_units[0]:~}"
+        kd_units = f"{run_data.dep_var_units[1]:~}"
+        E_units = f"{enzyme_concentration_data.dep_var_units[0]:~}"
+
+        df = pd.DataFrame(columns=[
+            'chamber', 'sample',
+            f'r_max ({r_max_units})', f'Kd ({kd_units})',
+            f'E_conc ({E_units})', 'fit_R2',
+        ])
+
+        for chamber in chamber_names:
+            chamber_index = np.where(chamber_names == chamber)[0]
+            chamber_rmax = run_data.dep_var[..., 0][chamber_index][0]
+            chamber_kd = run_data.dep_var[..., 1][chamber_index][0]
+            chamber_r2 = run_data.dep_var[..., 2][chamber_index][0]
+            chamber_E_conc = enzyme_concentration_data.dep_var[..., 0][chamber_index][0]
+
+            df = pd.concat([df, pd.DataFrame([{
+                'chamber': chamber,
+                'sample': sample_names[chamber_index][0],
+                f'r_max ({r_max_units})': chamber_rmax,
+                f'Kd ({kd_units})': chamber_kd,
+                f'E_conc ({E_units})': chamber_E_conc,
+                'fit_R2': chamber_r2,
+            }])], ignore_index=True)
+
+        if file_name is None:
+            file_name = f'{run_name}_chamber_binding_data.csv'
+        df.to_csv(f'{output_dir}/{file_name}', index=False)
+        print(f"Chamber binding data exported to {output_dir}/{file_name}")
+
+    def export_binding_subplots_by_chamber(
+        self,
+        analysis_name: str,
+        model_fit_name: str,
+        export_path: str,
+        dep_var_label: str = 'fluorescence_ratio',
+        model_pred_data_name: str = None,
+        dpi: int = 100,
+        x_log: bool = False,
+        y_log: bool = False,
+    ):
+        '''
+        Export a PDF of binding isotherm subplots for each chamber in a 32x56 grid.
+        '''
+        analysis: Data3D = self.get_run(analysis_name)
+        ri = analysis.dep_var_type.index(dep_var_label)
+        ratio_unit = analysis.dep_var_units[ri]
+        ratios = analysis.dep_var[..., ri] * ratio_unit  # (n_conc, n_chambers)
+        conc = analysis.indep_vars.concentration
+
+        mf_fit: Data2D = self.get_run(model_fit_name)
+        fit_types = mf_fit.dep_var_type
+        fit_vals = mf_fit.dep_var
+        fit_units = mf_fit.dep_var_units
+
+        preds = None
+        if model_pred_data_name:
+            mf_pred: Data3D = self.get_run(model_pred_data_name)
+            yi = mf_pred.dep_var_type.index("y_pred")
+            y_pred_unit = mf_pred.dep_var_units[yi]
+            preds = mf_pred.dep_var[..., yi] * y_pred_unit
+
+        chambers = analysis.indep_vars.chamber_IDs
+        samples = analysis.indep_vars.sample_IDs
+        sample_names = {cid: samples[i] for i, cid in enumerate(chambers)}
+
+        nrows, ncols = 56, 32
+        header_height = 2.5
+        total_height = 112 + header_height
+        fig, axes = plt.subplots(nrows, ncols, figsize=(64, total_height))
+
+        description_text = (
+            "Binding Isotherm Subplots by Chamber\n\n"
+            "This PDF displays binding isotherm subplots for each chamber across the 32x56 grid.\n"
+            "• Blue Circle Markers: Experimental fluorescence ratio at each ligand concentration.\n"
+            "• Solid Red Line: Best-fit binding isotherm for that chamber.\n"
+            "• Gray Shaded Envelope: 95% confidence interval across replicates of the same sample.\n"
+            "• Inset Text Box: Fitted r_max, Kd, and R² values."
+        )
+        fig.text(
+            0.5, 1.0 - (0.5 / total_height), description_text,
+            ha='center', va='top', fontsize=10, multialignment='left',
+            bbox=dict(boxstyle="round,pad=0.8", fc="white", ec="silver", lw=1),
+        )
+
+        tqdm.write("Plotting binding chambers...")
+        for y in tqdm(range(nrows)):
+            for x in range(ncols):
+                ax = axes[y, x]
+                cid = f"{x+1},{y+1}"
+
+                if cid not in sample_names:
+                    ax.axis('off')
+                    continue
+
+                idx = (chambers == cid)
+                if not np.any(idx):
+                    ax.axis('off')
+                    continue
+
+                x_data = conc
+                y_data = ratios[:, idx].flatten()
+                if hasattr(x_data, 'magnitude'):
+                    x_data = x_data.magnitude
+                if hasattr(y_data, 'magnitude'):
+                    y_data = y_data.magnitude
+
+                chamb_idx_arr = np.where(chambers == cid)[0]
+                chamb_idx = chamb_idx_arr[0]
+                vals = fit_vals[chamb_idx]
+
+                ax.set_title(f"{cid}: {sample_names[cid]}", fontsize=8)
+                ax.set_xlabel(f"Conc ({conc.units:~})", fontsize=6)
+                ax.set_ylabel(f"Ratio ({ratios.units:~})", fontsize=6)
+
+                if preds is None or np.isnan(vals).all():
+                    continue
+
+                ax.scatter(x_data, y_data, alpha=0.7, s=15, label='data')
+
+                sample = sample_names[cid]
+                same_idxs = [i for i, s in enumerate(samples) if s == sample]
+                y_all = preds[:, same_idxs]
+                y_min = np.nanpercentile(y_all, 2.5, axis=1)
+                y_max = np.nanpercentile(y_all, 97.5, axis=1)
+                y_p = preds[:, idx].flatten()
+                if hasattr(y_p, 'magnitude'):
+                    y_p = y_p.magnitude
+                if hasattr(y_min, 'magnitude'):
+                    y_min = y_min.magnitude
+                if hasattr(y_max, 'magnitude'):
+                    y_max = y_max.magnitude
+
+                ax.plot(x_data, y_p, color='red', linewidth=1, label='fit')
+                ax.fill_between(x_data, y_min, y_max, color='gray', alpha=0.3, label='95% CI')
+
+                txt = "\n".join(f"{nm}={v:.2f} {u:~}" for nm, v, u in zip(fit_types, vals, fit_units))
+                ax.text(
+                    0.05, 0.95, txt, transform=ax.transAxes,
+                    va='top', fontsize=6, bbox=dict(boxstyle="round", fc="white", alpha=0.6),
+                )
+
+                if x_log:
+                    ax.set_xscale("log")
+                if y_log:
+                    ax.set_yscale("log")
+                ax.tick_params(axis='both', which='major', labelsize=6)
+
+        top_fraction = 1.0 - (header_height / total_height)
+        plt.tight_layout(rect=[0, 0, 1, top_fraction])
+        tqdm.write(f"Exporting binding subplots to {export_path}")
+
+        if type(export_path) == str:
+            Path(export_path).parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(export_path, dpi=dpi)
+        elif type(export_path) == list:
+            for path in export_path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(path, dpi=dpi)
+        plt.close(fig)
+        print(f"Exported binding subplots to {export_path}")
+
+    def export_binding_subplots_by_sample(
+        self,
+        analysis_name: str,
+        model_fit_name: str,
+        export_path: str,
+        dep_var_label: str = 'fluorescence_ratio',
+        model_pred_data_name: str = None,
+        hide_excluded_samples: bool = False,
+        dpi: int = 100,
+        aspect_ratio: float = 1.5,
+        x_log: bool = False,
+        y_log: bool = False,
+    ):
+        '''
+        Export a PDF of binding isotherm subplots for each sample with replicates.
+        '''
+        analysis: Data3D = self.get_run(analysis_name)
+        ri = analysis.dep_var_type.index(dep_var_label)
+        ratio_unit = analysis.dep_var_units[ri]
+        ratios = analysis.dep_var[..., ri] * ratio_unit
+        conc = analysis.indep_vars.concentration
+
+        mf_fit: Data2D = self.get_run(model_fit_name)
+        rmax_idx = mf_fit.dep_var_type.index("r_max")
+        kd_idx = mf_fit.dep_var_type.index("Kd")
+        all_rmax = mf_fit.dep_var[..., rmax_idx] * mf_fit.dep_var_units[rmax_idx]
+        all_kds = mf_fit.dep_var[..., kd_idx] * mf_fit.dep_var_units[kd_idx]
+
+        chambers = analysis.indep_vars.chamber_IDs
+        samples = analysis.indep_vars.sample_IDs
+
+        unique_samples = np.unique(samples)
+        sample_to_chambers = {s: [] for s in unique_samples}
+        for i, s in enumerate(samples):
+            sample_to_chambers[s].append(i)
+
+        n_samples = len(unique_samples)
+        ncols = 3
+        nrows = int(np.ceil(n_samples / ncols))
+        header_height = 2.5
+        plot_height = (4 / aspect_ratio) * nrows
+        total_height = plot_height + header_height
+
+        fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, total_height), squeeze=False)
+        for ax in axes.flatten():
+            ax.set_box_aspect(1 / aspect_ratio)
+
+        description_text = (
+            "Binding Isotherm Subplots by Sample\n\n"
+            "This PDF displays binding isotherm subplots for each sample across its replicates.\n"
+            "• Blue Circle Markers & Error Bars: Mean fluorescence ratio across replicates at each\n"
+            "  ligand concentration, with error bars indicating ±1 standard deviation.\n"
+            "• Solid Blue Line: Best-fit isotherm using mean r_max and mean Kd across replicates.\n"
+            "• Light Blue Shaded Envelope: ±1 standard deviation interval from varying r_max while\n"
+            "  keeping Kd at its mean value.\n"
+            "• Text Annotation: Average r_max and Kd values with standard deviations."
+        )
+        fig.text(
+            0.5, 1.0 - (0.5 / total_height), description_text,
+            ha='center', va='top', fontsize=10, multialignment='left',
+            bbox=dict(boxstyle="round,pad=0.8", fc="white", ec="silver", lw=1),
+        )
+
+        tqdm.write("Plotting binding samples...")
+        skipped_samples = []
+        for i, sample in enumerate(tqdm(unique_samples)):
+            i = i - len(skipped_samples)
+            row = i // ncols
+            col = i % ncols
+            ax = axes[row, col]
+
+            indices = sample_to_chambers[sample]
+            replicate_ratios = ratios[:, indices]
+            mean_ratios = np.nanmean(replicate_ratios, axis=1)
+            std_ratios = np.nanstd(replicate_ratios, axis=1)
+
+            if hasattr(mean_ratios, 'magnitude'):
+                y = mean_ratios.magnitude
+                yerr = std_ratios.magnitude
+                x = conc.magnitude
+            else:
+                y = mean_ratios
+                yerr = std_ratios
+                x = conc
+
+            sample_rmax = all_rmax[indices]
+            sample_kds = all_kds[indices]
+            mean_rmax = np.nanmean(sample_rmax)
+            mean_kd = np.nanmean(sample_kds)
+            rmax_stdev = np.nanstd(sample_rmax)
+            kd_stdev = np.nanstd(sample_kds)
+            rmax_up = mean_rmax + rmax_stdev
+            rmax_down = mean_rmax - rmax_stdev
+
+            if hide_excluded_samples:
+                if hasattr(mean_rmax, 'magnitude'):
+                    is_nan = np.isnan(mean_rmax.magnitude)
+                else:
+                    is_nan = np.isnan(mean_rmax)
+                if is_nan:
+                    skipped_samples.append(sample)
+                    continue
+
+            ax.errorbar(x, y, yerr=yerr, fmt='o', capsize=3, label='mean ratio', color='blue')
+
+            pred_conc_range = np.linspace(conc.min(), conc.max(), 100)
+            pred_y_mean = binding_isotherm_model(pred_conc_range, mean_rmax, mean_kd)
+            pred_y_up = binding_isotherm_model(pred_conc_range, rmax_up, mean_kd)
+            pred_y_down = binding_isotherm_model(pred_conc_range, rmax_down, mean_kd)
+
+            if hasattr(pred_y_mean, 'magnitude'):
+                py_mean = pred_y_mean.magnitude
+                py_up = pred_y_up.magnitude
+                py_down = pred_y_down.magnitude
+            else:
+                py_mean = pred_y_mean
+                py_up = pred_y_up
+                py_down = pred_y_down
+
+            ax.plot(pred_conc_range, py_mean, color="blue", label="mean fit")
+            ax.fill_between(pred_conc_range, py_down, py_up, color="blue", alpha=0.2, label=r'$r_{max} \pm 1 \sigma$')
+
+            ax.text(
+                0.95, 0.05,
+                f"$\\overline{{r_{{max}}}}$ = {mean_rmax.magnitude:.2f} ± {rmax_stdev.magnitude:.2f}\n"
+                f"$\\overline{{K_d}}$ = {mean_kd.magnitude:.2f} ± {kd_stdev.magnitude:.2f}",
+                transform=ax.transAxes,
+                ha="right", va="bottom", fontsize=8,
+            )
+
+            ax.set_title(f"{sample}", fontsize=10)
+            conc_unit = f"({conc.units:~})" if hasattr(conc, 'units') else ""
+            ratio_unit_str = f"({ratios.units:~})" if hasattr(ratios, 'units') else ""
+            ax.set_xlabel(f"[Ligand] {conc_unit}", fontsize=8)
+            ax.set_ylabel(f"Fluorescence Ratio {ratio_unit_str}", fontsize=8)
+
+            if x_log:
+                ax.set_xscale("log")
+            if y_log:
+                ax.set_yscale("log")
+            ax.tick_params(axis='both', which='major', labelsize=8)
+
+        for j in range(i + 1, nrows * ncols):
+            row = j // ncols
+            col = j % ncols
+            axes[row, col].axis('off')
+
+        top_fraction = 1.0 - (header_height / total_height)
+        plt.tight_layout(rect=[0, 0, 1, top_fraction])
+        tqdm.write(f"Exporting binding subplots by sample to {export_path}")
+
+        if type(export_path) == str:
+            Path(export_path).parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(export_path, dpi=dpi)
+        elif type(export_path) == list:
+            for path in export_path:
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                plt.savefig(path, dpi=dpi)
+        plt.close(fig)
+        print(f"Exported binding subplots by sample to {export_path}")
+
+    def export_binding_end_to_end_summary_by_sample(
+        self,
+        export_dir: str = 'binding_end_to_end_summaries',
+        sample_ids: list = None,
+        binding_raw_run: str = 'binding',
+        binding_fits_run: str = 'binding_fits',
+        binding_pred_run: str = None,
+        dpi: int = 150,
+    ):
+        '''
+        Export a PDF binding isotherm summary for each sample with replicates.
+        '''
+        import matplotlib.pyplot as plt
+        import matplotlib.gridspec as gridspec
+        from tqdm import tqdm
+        from htbam_analysis.analysis.fit import binding_isotherm_model
+
+        binding_raw = self.get_run(binding_raw_run)
+        mf_fit = self.get_run(binding_fits_run)
+
+        assert isinstance(binding_raw, Data3D), "binding_raw_run must be Data3D."
+        assert isinstance(mf_fit, Data2D), "binding_fits_run must be Data2D."
+
+        ri = binding_raw.dep_var_type.index('fluorescence_ratio')
+        ratios = binding_raw.dep_var[:, :, ri]
+        conc = binding_raw.indep_vars.concentration
+
+        rmax_idx = mf_fit.dep_var_type.index('r_max')
+        kd_idx = mf_fit.dep_var_type.index('Kd')
+        all_rmax = mf_fit.dep_var[..., rmax_idx]
+        all_kds = mf_fit.dep_var[..., kd_idx]
+
+        preds = None
+        if binding_pred_run:
+            mf_pred = self.get_run(binding_pred_run)
+            yi = mf_pred.dep_var_type.index('y_pred')
+            preds = mf_pred.dep_var[..., yi]
+
+        chambers = binding_raw.indep_vars.chamber_IDs
+        samples = binding_raw.indep_vars.sample_IDs
+        unique_samples = np.unique(samples)
+        if sample_ids:
+            unique_samples = [s for s in unique_samples if s in sample_ids]
+
+        if hasattr(conc, 'magnitude'):
+            x_mm = conc.magnitude
+        else:
+            x_mm = np.asarray(conc, dtype=float)
+        x_range = np.linspace(0, max(x_mm), 100) if len(x_mm) > 0 else []
+
+        Path(export_dir).mkdir(parents=True, exist_ok=True)
+
+        for sample in tqdm(unique_samples, desc='Binding summaries'):
+            chamber_indices = np.where(samples == sample)[0]
+            if len(chamber_indices) == 0:
+                continue
+
+            n_reps = len(chamber_indices)
+            mean_rmax = np.nanmean(all_rmax[chamber_indices])
+            std_rmax = np.nanstd(all_rmax[chamber_indices])
+            mean_kd = np.nanmean(all_kds[chamber_indices])
+
+            fig, axes = plt.subplots(n_reps, 2, figsize=(10, 3 * n_reps), squeeze=False)
+
+            for row, c_idx in enumerate(chamber_indices):
+                ax_data = axes[row, 0]
+                y_data = ratios[:, c_idx]
+                if hasattr(y_data, 'magnitude'):
+                    y_data = y_data.magnitude
+                ax_data.scatter(x_mm, y_data, color='blue', s=20)
+                ax_data.set_xlabel('[Ligand]')
+                ax_data.set_ylabel('Fluorescence Ratio')
+                ax_data.set_title(f"{chambers[c_idx]}: {samples[c_idx]}")
+
+                ax_fit = axes[row, 1]
+                if preds is not None:
+                    y_pred = preds[:, c_idx]
+                    if hasattr(y_pred, 'magnitude'):
+                        y_pred = y_pred.magnitude
+                    ax_fit.plot(x_mm, y_pred, color='red', label='fit')
+                elif len(x_range) > 0 and not np.isnan(mean_rmax) and not np.isnan(mean_kd):
+                    rmax_m = mean_rmax.magnitude if hasattr(mean_rmax, 'magnitude') else mean_rmax
+                    kd_m = mean_kd.magnitude if hasattr(mean_kd, 'magnitude') else mean_kd
+                    std_m = std_rmax.magnitude if hasattr(std_rmax, 'magnitude') else std_rmax
+                    y_mean = binding_isotherm_model(x_range, rmax_m, kd_m)
+                    y_up = binding_isotherm_model(x_range, rmax_m + std_m, kd_m)
+                    y_down = binding_isotherm_model(x_range, rmax_m - std_m, kd_m)
+                    ax_fit.fill_between(x_range, y_down, y_up, color='gray', alpha=0.3)
+                    ax_fit.plot(x_range, y_mean, 'k--')
+                ax_fit.set_xlabel('[Ligand]')
+                ax_fit.set_ylabel('Fluorescence Ratio')
+                ax_fit.set_title('Binding Isotherm')
+
+            fig.suptitle(f"Sample {sample}", fontsize=14)
+            fig.tight_layout()
             out_path = Path(export_dir) / f"{sample}.pdf"
             plt.savefig(out_path, dpi=dpi, bbox_inches='tight')
             plt.close(fig)
