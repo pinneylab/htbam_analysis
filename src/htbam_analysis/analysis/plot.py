@@ -771,7 +771,83 @@ def plot_MM_chip(experiment: 'HTBAMExperiment',
     plot_chip(mms_to_plot, sample_names,
               graphing_function=plot_rates_vs_conc,
               title="Initial Rates vs Concentration",
-              colorbar_title="V_max")   
+              colorbar_title="V_max")
+
+def plot_binding_isotherm_chip(experiment: 'HTBAMExperiment',
+                               experiment_name: str,
+                               model_fit_name: str,
+                               model_pred_data_name: str = None,
+                               x_log: bool = False,
+                               y_log: bool = False):
+    """
+    Plot binding isotherm fits with fluorescence ratio vs ligand concentration for each chamber.
+    Optionally overlay fitted curve from `model_pred_data_name` and
+    annotate fit parameters from `model_fit_name`.
+    """
+    experiment_data: Data3D = experiment.get_run(experiment_name)
+    ri = experiment_data.dep_var_type.index("fluorescence_ratio")
+    ratio_unit = experiment_data.dep_var_units[ri]
+    ratios = experiment_data.dep_var[:, :, ri] * ratio_unit  # (n_conc, n_chamb)
+    conc = experiment_data.indep_vars.concentration
+
+    mf_fit: Data2D = experiment.get_run(model_fit_name)
+    fit_types = mf_fit.dep_var_type
+    fit_vals = mf_fit.dep_var
+    fit_units = mf_fit.dep_var_units
+
+    kd_idx = mf_fit.dep_var_type.index("Kd")
+    kds = mf_fit.dep_var[..., kd_idx] * fit_units[kd_idx]
+
+    preds = None
+    if model_pred_data_name:
+        mf_pred: Data3D = experiment.get_run(model_pred_data_name)
+        yi = mf_pred.dep_var_type.index("y_pred")
+        y_pred_unit = mf_pred.dep_var_units[yi]
+        preds = mf_pred.dep_var[..., yi] * y_pred_unit
+
+    chambers = experiment_data.indep_vars.chamber_IDs
+    samples = experiment_data.indep_vars.sample_IDs
+    sample_names = {cid: samples[i] for i, cid in enumerate(chambers)}
+    kds_to_plot = {cid: kds[i] for i, cid in enumerate(chambers)}
+
+    def plot_ratio_vs_conc(cid, ax):
+        idx = (chambers == cid)
+        x = conc
+        y = ratios[:, idx].flatten()
+        ax.plot(x, y, marker='o', linestyle='none', alpha=0.7, label="current well")
+
+        if model_pred_data_name:
+            sample = sample_names[cid]
+            same_idxs = [i for i, s in enumerate(samples) if s == sample]
+            y_all = preds[:, same_idxs]
+            y_min = np.nanpercentile(y_all, 2.5, axis=1)
+            y_max = np.nanpercentile(y_all, 97.5, axis=1)
+            y_p = preds[:, idx].flatten()
+            ax.plot(x, y_p, color="red", label="current well fit")
+            ax.fill_between(x, y_min, y_max, color="gray", alpha=0.3, label='95% CI')
+
+        if model_fit_name:
+            chamb_idx = np.where(chambers == cid)[0][0]
+            vals = fit_vals[chamb_idx]
+            txt = "".join(f"{nm}={v:.2f} {u:~}\n" for nm, v, u in zip(fit_types, vals, fit_units))
+            ax.text(0.05, 0.95, txt, transform=ax.transAxes,
+                    va="top", fontsize=8, bbox=dict(boxstyle="round", fc="white", alpha=0.7))
+
+        if model_pred_data_name or model_fit_name:
+            ax.legend()
+        ax.set_title(f"{cid}: {sample_names[cid]}")
+        ax.set_xlabel(f"Concentration ({conc.units:~})")
+        ax.set_ylabel(f"Fluorescence Ratio ({ratios.units:~})")
+        if x_log:
+            ax.set_xscale("log")
+        if y_log:
+            ax.set_yscale("log")
+        return ax
+
+    plot_chip(kds_to_plot, sample_names,
+              graphing_function=plot_ratio_vs_conc,
+              title="Binding Isotherms",
+              colorbar_title="Kd")
 
 def plot_MM_div_E_chip(experiment: 'HTBAMExperiment',
                 analysis_name: str,
