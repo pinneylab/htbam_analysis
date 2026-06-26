@@ -223,7 +223,9 @@ class ImageStitcher:
         rotation: Optional[float] = None, 
         get_rotation_from: str = '*', 
         acqui_origin: Tuple[bool] = (True, False),
-        method: str = "cut"
+        method: str = "cut",
+        overlap: Optional[float] = 0.1,
+        get_overlap_from: str = '*'
     ):
 
         assert isinstance(self.raster_data, pd.DataFrame), 'Raster data has not been set.'
@@ -256,6 +258,40 @@ class ImageStitcher:
             if rotation is None:
                 raise ValueError(f"Failed to auto-detect rotation from any matching raster group (pattern: '{get_rotation_from}'). \n You may want to manually provide a rotation angle by setting the 'rotation' parameter in stitch_images().")
 
+        # Automatically calculate overlap if None is passed
+        if overlap is None:
+            matched_overlap_paths = [
+                gp for gp in grouped.groups.keys()
+                if fnmatch.fnmatch(gp.name, get_overlap_from) or 
+                   fnmatch.fnmatch(str(gp.relative_to(self._raw_images_path)), get_overlap_from)
+            ]
+            if not matched_overlap_paths:
+                raise ValueError(f"No raster groups matched the pattern '{get_overlap_from}' for overlap detection. Available groups: {[gp.name for gp in grouped.groups.keys()]}")
+            
+            detected_overlaps = []
+            for group_path in matched_overlap_paths:
+                print(f"Auto-detecting optimal overlap from raster: {group_path}")
+                try:
+                    df = grouped.get_group(group_path)
+                    overlap_csv, width, height, ff_correction = df[['raster_overlap', 'raster_width', 'raster_height', 'apply_ff_correction']].iloc[0]
+                    width, height = int(width), int(height)
+                    raster = df['image_path'].to_list()
+                    # Use a baseline guess of 0.1 to extract overlap strips
+                    temp_params = rastering.RasterParams(0.1, size=SIZE, acqui_ori=acqui_origin, rotation=rotation, dims=(width, height), auto_ff=ff_correction, ff_type='BaSiC')
+                    raster_obj = rastering.FlatRaster(image_refs=raster, params=temp_params)
+                    raster_obj.fetch_images()
+                    val = raster_obj.detect_overlap()
+                    print(f"Detected overlap for {group_path.name}: {val:.4f}")
+                    detected_overlaps.append(val)
+                except Exception as e:
+                    print(f"Warning: Failed to auto-detect overlap for {group_path.name}: {e}")
+            
+            if not detected_overlaps:
+                raise ValueError(f"Failed to auto-detect overlap from any matching raster group (pattern: '{get_overlap_from}').")
+                
+            overlap = float(np.median(detected_overlaps))
+            print(f"Using optimal overlap: {overlap:.4f} from matching rasters")
+
         success_counter = 0
         for image_parent, df in tqdm(grouped, desc='Stitching images.'):
 
@@ -265,7 +301,7 @@ class ImageStitcher:
                 outpath.parent.mkdir(parents=True, exist_ok=True)
 
                 # extract params, stitch image
-                overlap, width, height, ff_correction = df[['raster_overlap', 'raster_width', 'raster_height', 'apply_ff_correction']].iloc[0]
+                overlap_csv, width, height, ff_correction = df[['raster_overlap', 'raster_width', 'raster_height', 'apply_ff_correction']].iloc[0]
                 width, height = int(width), int(height)
                 raster = df['image_path'].to_list()
                 params = rastering.RasterParams(overlap, size=SIZE, acqui_ori=acqui_origin, rotation=rotation, dims=(width, height), auto_ff=ff_correction, ff_type='BaSiC') 

@@ -543,7 +543,7 @@ def plot_initial_rates_chip(experiment: 'HTBAMExperiment', analysis_name: str, e
 
         return ax
     
-    plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_initial_rates, title='Kinetics: Initial Rates', colorbar_title='Initial Rate')
+    plot_chip(slopes_dict, sample_names_dict, graphing_function=plot_chamber_initial_rates, title='Kinetics: Initial Rates', colorbar_title='Highest Initial Rate')
 
 def plot_product_vs_time_chip(experiment: 'HTBAMExperiment', experiment_name: str, skip_start_timepoint: bool = True,
                              fit_points_mask: str = None,
