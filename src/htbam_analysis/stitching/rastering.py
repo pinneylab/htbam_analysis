@@ -429,6 +429,86 @@ class Raster(ABC):
         fullStitched = np.concatenate(rowsStitched, axis=0)  # Stitch cols
         return fullStitched
 
+    def detect_overlap(self) -> float:
+        """
+        Dynamically calculates the optimal overlap fraction using phase cross-correlation
+        across high-contrast boundaries of the raster images.
+        """
+        from skimage.registration import phase_cross_correlation
+        
+        imsize = self.params.size
+        expected_overlap = int(imsize * 0.1)
+        if expected_overlap <= 0:
+            return 0.1
+            
+        cols_count = self.params.dims[0]
+        rows_count = self.params.dims[1]
+        
+        if len(self._images) != cols_count * rows_count:
+            return 0.1
+            
+        tiles = {}
+        for c in range(cols_count):
+            for r in range(rows_count):
+                tiles[(c, r)] = self._images[c * rows_count + r]
+                
+        boundaries = []
+        
+        # 1. Search horizontal boundaries
+        for r in range(rows_count):
+            for c in range(cols_count - 1):
+                t1 = tiles[(c, r)].astype(float)
+                t2 = tiles[(c+1, r)].astype(float)
+                
+                crop_margin = int(imsize * 0.15)
+                strip1 = t1[crop_margin:-crop_margin, -expected_overlap:]
+                strip2 = t2[crop_margin:-crop_margin, :expected_overlap]
+                
+                std_val = (np.std(strip1) + np.std(strip2)) / 2
+                boundaries.append((std_val, strip1, strip2, 'H'))
+                
+        # 2. Search vertical boundaries
+        for c in range(cols_count):
+            for r in range(rows_count - 1):
+                t1 = tiles[(c, r)].astype(float)
+                t2 = tiles[(c, r+1)].astype(float)
+                
+                crop_margin = int(imsize * 0.15)
+                strip1 = t1[-expected_overlap:, crop_margin:-crop_margin]
+                strip2 = t2[:expected_overlap, crop_margin:-crop_margin]
+                
+                std_val = (np.std(strip1) + np.std(strip2)) / 2
+                boundaries.append((std_val, strip1, strip2, 'V'))
+                
+        if not boundaries:
+            return 0.1
+            
+        # Sort by standard deviation (highest feature contrast first)
+        boundaries.sort(key=lambda x: x[0], reverse=True)
+        
+        calculated_overlaps = []
+        for std_val, strip1, strip2, b_type in boundaries[:5]:
+            try:
+                shift, error, diffphase = phase_cross_correlation(strip1, strip2, upsample_factor=1)
+                if b_type == 'H':
+                    shift_val = shift[1]
+                else:
+                    shift_val = shift[0]
+                
+                # Filter out shifts that are unreasonably large to prevent aligning unrelated periodic channels
+                if abs(shift_val) < 50:
+                    actual_overlap = expected_overlap - shift_val
+                    overlap_frac = actual_overlap / imsize
+                    calculated_overlaps.append(overlap_frac)
+            except Exception:
+                pass
+                
+        if not calculated_overlaps:
+            # TODO: This should raise, instead of assuming 10%
+            return 0.1
+            
+        return float(np.median(calculated_overlaps))
+
     def overlap_stitch(self):
         """
         #TODO: re-implement overlap stitching method
