@@ -219,13 +219,52 @@ class ImageStitcher:
             
         return float(np.median(angles))
 
+    def find_optimal_rotation_from_overlaps(
+        self,
+        raster_path: Union[Path, str],
+        acqui_origin: Tuple[bool, bool] = (True, False),
+        search_range: Tuple[float, float] = (-4.0, 4.0)
+    ) -> float:
+        """
+        Automatically determine the optimal rotation for a given raster
+        by registering the overlapping boundary regions of adjacent tiles.
+        """
+        raster_path = Path(raster_path) if not isinstance(raster_path, Path) else raster_path
+        mask = self.raster_data['image_path_parent'] == raster_path
+        df = self.raster_data[mask]
+        
+        if df.empty:
+            raise ValueError(f"No raster data found for {raster_path}")
+            
+        overlap_csv, width, height, ff_correction = df[['raster_overlap', 'raster_width', 'raster_height', 'apply_ff_correction']].iloc[0]
+        width, height = int(width), int(height)
+        raster = df['image_path'].to_list()
+        
+        # Use the overlap from the csv, or fallback to 0.1
+        overlap = overlap_csv if (0.0 < overlap_csv < 1.0) else 0.1
+        
+        # Instantiate a temporary raster with rotation=0.0 to load raw images
+        temp_params = rastering.RasterParams(
+            overlap=overlap,
+            size=1600,
+            acqui_ori=acqui_origin,
+            rotation=0.0,
+            dims=(width, height),
+            auto_ff=ff_correction,
+            ff_type='BaSiC'
+        )
+        
+        raster_obj = rastering.FlatRaster(image_refs=raster, params=temp_params)
+        return raster_obj.detect_rotation(search_range=search_range)
+
     def stitch_images(self, 
         rotation: Optional[float] = None, 
         get_rotation_from: str = '*', 
         acqui_origin: Tuple[bool] = (True, False),
         method: str = "cut",
         overlap: Optional[float] = 0.1,
-        get_overlap_from: str = '*'
+        get_overlap_from: str = '*',
+        rotation_method: str = "overlaps"
     ):
 
         assert isinstance(self.raster_data, pd.DataFrame), 'Raster data has not been set.'
@@ -246,17 +285,26 @@ class ImageStitcher:
             if not matched_group_paths:
                 raise ValueError(f"No raster groups matched the pattern '{get_rotation_from}'. Available groups: {[gp.name for gp in grouped.groups.keys()]}")
             
+            detected_rotations = []
             for group_path in matched_group_paths:
-                print(f"Auto-detecting optimal rotation from raster: {group_path}")
+                print(f"Auto-detecting optimal rotation from raster: {group_path} using method: {rotation_method}")
                 try:
-                    rotation = self.find_optimal_rotation(group_path)
-                    print(f"Using optimal rotation: {rotation:.3f} degrees from {group_path}")
-                    break
+                    if rotation_method == "overlaps":
+                        val = self.find_optimal_rotation_from_overlaps(group_path, acqui_origin=acqui_origin)
+                    elif rotation_method == "radon":
+                        val = self.find_optimal_rotation(group_path)
+                    else:
+                        raise ValueError(f"Unknown rotation method: {rotation_method}")
+                    print(f"Detected rotation for {group_path.name}: {val:.3f} degrees")
+                    detected_rotations.append(val)
                 except ValueError as e:
-                    print(f"Warning: {e}. Trying next raster group...")
+                    print(f"Warning: Failed to auto-detect rotation for {group_path.name}: {e}")
             
-            if rotation is None:
+            if not detected_rotations:
                 raise ValueError(f"Failed to auto-detect rotation from any matching raster group (pattern: '{get_rotation_from}'). \n You may want to manually provide a rotation angle by setting the 'rotation' parameter in stitch_images().")
+                
+            rotation = float(np.median(detected_rotations))
+            print(f"Using optimal rotation: {rotation:.3f} degrees from matching rasters")
 
         # Automatically calculate overlap if None is passed
         if overlap is None:

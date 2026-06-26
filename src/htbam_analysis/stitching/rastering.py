@@ -509,6 +509,123 @@ class Raster(ABC):
             
         return float(np.median(calculated_overlaps))
 
+    def detect_rotation(self, search_range=None, num_boundaries=20) -> float:
+        """
+        Dynamically calculates the camera-to-stage rotation angle by registering
+        unrotated neighboring tiles and measuring the diagonal drift (shear) 
+        introduced by the stage translation relative to the camera sensor.
+        """
+        from skimage.registration import phase_cross_correlation
+        
+        imsize = self.params.size
+        overlap = self.params.overlap
+        expected_overlap = int(imsize * overlap)
+        if expected_overlap <= 0:
+            expected_overlap = int(imsize * 0.1) # fallback
+            
+        cols_count = self.params.dims[0]
+        rows_count = self.params.dims[1]
+        
+        if len(self._image_refs) != cols_count * rows_count:
+            return 0.0
+            
+        # Helper to load raw tiles on demand and cache them
+        raw_cache = {}
+        def get_raw_tile(c, r):
+            coord = (c, r)
+            if coord not in raw_cache:
+                idx = c * rows_count + r
+                raw_cache[coord] = io.imread(self._image_refs[idx]).astype(float)
+            return raw_cache[coord]
+            
+        # Find horizontal and vertical boundaries and calculate contrast
+        all_boundaries = []
+        crop_margin = int(imsize * 0.15)
+        
+        # 1. Horizontal boundaries
+        for r in range(rows_count):
+            for c in range(cols_count - 1):
+                try:
+                    t1 = get_raw_tile(c, r)
+                    t2 = get_raw_tile(c + 1, r)
+                    
+                    strip1 = t1[crop_margin:-crop_margin, -expected_overlap:]
+                    strip2 = t2[crop_margin:-crop_margin, :expected_overlap]
+                    std_val = (np.std(strip1) + np.std(strip2)) / 2
+                    all_boundaries.append((std_val, c, r, c + 1, r, 'H'))
+                except Exception:
+                    pass
+                    
+        # 2. Vertical boundaries
+        for c in range(cols_count):
+            for r in range(rows_count - 1):
+                try:
+                    t1 = get_raw_tile(c, r)
+                    t2 = get_raw_tile(c, r + 1)
+                    
+                    strip1 = t1[-expected_overlap:, crop_margin:-crop_margin]
+                    strip2 = t2[:expected_overlap, crop_margin:-crop_margin]
+                    std_val = (np.std(strip1) + np.std(strip2)) / 2
+                    all_boundaries.append((std_val, c, r, c, r + 1, 'V'))
+                except Exception:
+                    pass
+                    
+        if not all_boundaries:
+            print("Warning: No valid boundaries found for rotation detection. Defaulting to 0.0")
+            return 0.0
+            
+        # Sort by contrast (standard deviation) descending and take the top N
+        all_boundaries.sort(key=lambda x: x[0], reverse=True)
+        
+        n_boundaries = num_boundaries if num_boundaries is not None else 20
+        selected_boundaries = all_boundaries[:min(n_boundaries, len(all_boundaries))]
+        
+        angles = []
+        
+        # For each selected boundary, evaluate the translation shift and compute angle
+        for _, c1, r1, c2, r2, b_type in selected_boundaries:
+            try:
+                t1 = get_raw_tile(c1, r1)
+                t2 = get_raw_tile(c2, r2)
+                
+                # Demean to improve cross correlation sensitivity to features
+                t1_dm = t1 - t1.mean()
+                t2_dm = t2 - t2.mean()
+                
+                if b_type == 'H':
+                    strip1 = t1_dm[crop_margin:-crop_margin, -expected_overlap:]
+                    strip2 = t2_dm[crop_margin:-crop_margin, :expected_overlap]
+                    
+                    shift, error, diffphase = phase_cross_correlation(strip1, strip2, upsample_factor=10)
+                    dy, dx = shift[0], shift[1]
+                    
+                    # This should discard found deviations that are greater than 1 row or column over.
+                    if abs(dx) < 150 and abs(dy) < 150:
+                        Dx = imsize - expected_overlap
+                        theta_val = np.degrees(np.arctan2(dy, Dx + dx))
+                        angles.append(theta_val)
+                else:
+                    strip1 = t1_dm[-expected_overlap:, crop_margin:-crop_margin]
+                    strip2 = t2_dm[:expected_overlap, crop_margin:-crop_margin]
+                    
+                    shift, error, diffphase = phase_cross_correlation(strip1, strip2, upsample_factor=10)
+                    dy, dx = shift[0], shift[1]
+                    
+                    # same here, discarding too-large deviations. We want the nearest matching shift.
+                    if abs(dx) < 150 and abs(dy) < 150:
+                        Dy = imsize - expected_overlap
+                        theta_val = np.degrees(np.arctan2(-dx, Dy + dy))
+                        angles.append(theta_val)
+                        
+            except Exception:
+                pass
+                
+        if not angles:
+            raise ValueError("Warning: No valid rotation angles calculated.")
+            #return 0.0
+            
+        return float(np.median(angles))
+
     def overlap_stitch(self):
         """
         #TODO: re-implement overlap stitching method
